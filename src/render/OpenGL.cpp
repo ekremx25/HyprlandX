@@ -367,6 +367,7 @@ CHyprOpenGLImpl::CHyprOpenGLImpl() : m_drmFD(g_pCompositor->m_drmRenderNode.fd >
     RASSERT(EXTENSIONS, "Couldn't retrieve openGL extensions!");
 
     m_extensions = EXTENSIONS;
+    m_exts.OES_EGL_image_external_essl3 = m_extensions.contains("GL_OES_EGL_image_external_essl3");
 
     LOG(Log::DEBUG, "Creating the Hypr OpenGL Renderer!");
     LOG(Log::DEBUG, "Using: {}", rc<const char*>(glGetString(GL_VERSION)));
@@ -497,26 +498,7 @@ std::optional<std::vector<uint64_t>> CHyprOpenGLImpl::getModsForFormat(EGLint fo
         return std::nullopt;
     }
 
-    std::vector<uint64_t> result;
-    // reserve number of elements to avoid reallocations
-    result.reserve(mods.size());
-
-    bool linearIsExternal = false;
-    for (size_t i = 0; i < std::min(mods.size(), external.size()); ++i) {
-        if (external[i]) {
-            if (mods[i] == DRM_FORMAT_MOD_LINEAR)
-                linearIsExternal = true;
-            continue;
-        }
-
-        result.push_back(mods[i]);
-    }
-
-    // if the driver doesn't mark linear as external, add it. It's allowed unless the driver says otherwise. (e.g. nvidia)
-    if (!linearIsExternal && std::ranges::find(mods, DRM_FORMAT_MOD_LINEAR) == mods.end())
-        result.push_back(DRM_FORMAT_MOD_LINEAR);
-
-    return result;
+    return NFormatUtils::getTexture2DModifiers(mods, external);
 }
 
 void CHyprOpenGLImpl::initDRMFormats() {
@@ -940,7 +922,7 @@ void CHyprOpenGLImpl::end(CRenderContext& ctx) {
 
 static const std::vector<std::string> SHADER_INCLUDES = {
     "defines.h",       "constants.h",      "cm_helpers.glsl", "rounding.glsl", "CM.glsl",         "tonemap.glsl",     "gain.glsl",     "border.glsl",      "shadow.glsl",
-    "inner_glow.glsl", "blurprepare.glsl", "blur1.glsl",      "blur2.glsl",    "blurFinish.glsl", "motion_blur.glsl", "gradient.glsl", "glassFinish.glsl", "fluidJar.glsl",
+    "inner_glow.glsl", "blurprepare.glsl", "blur1.glsl",      "blur2.glsl",    "blurFinish.glsl", "motion_blur.glsl", "motion_blur_sample.glsl", "gradient.glsl", "glassFinish.glsl", "fluidJar.glsl",
 };
 
 // order matters, see ePreparedFragmentShader
@@ -1426,8 +1408,11 @@ WP<CShader> CHyprOpenGLImpl::renderToFBInternal(CRenderContext& ctx, SP<ITexture
         case TEXTURE_RGBA: shaderFeatures |= SH_FEAT_RGBA; break;
         case TEXTURE_RGBX: shaderFeatures &= ~SH_FEAT_RGBA; break;
 
-        // TODO set correct features
-        case TEXTURE_EXTERNAL: shader = getShaderVariant(SH_FRAG_EXT, SH_FEAT_ROUNDING | SH_FEAT_DISCARD | SH_FEAT_TINT | globalFeatures(ctx)); break; // might be unused
+        case TEXTURE_EXTERNAL:
+            shaderFeatures |= SH_FEAT_EXTERNAL;
+            if (!tex->m_opaque)
+                shaderFeatures |= SH_FEAT_RGBA;
+            break;
         default: RASSERT(false, "tex->m_iTarget unsupported!");
     }
 
@@ -1501,6 +1486,9 @@ WP<CShader> CHyprOpenGLImpl::renderToFBInternal(CRenderContext& ctx, SP<ITexture
     if (data.allowDim && ctx.m_data.currentWindow &&
         (ctx.m_data.currentWindow->presentation().notRespondingTint() > 0 || ctx.m_data.currentWindow->presentation().dimPercent() > 0))
         shaderFeatures |= SH_FEAT_TINT;
+
+    if (data.saturation != 1.F && !data.finalMonitorCM && !data.cmBackToSRGB)
+        shaderFeatures |= SH_FEAT_SATURATION;
 
     if (data.round > 0)
         shaderFeatures |= SH_FEAT_ROUNDING;
@@ -1602,6 +1590,13 @@ WP<CShader> CHyprOpenGLImpl::renderToFBInternal(CRenderContext& ctx, SP<ITexture
     } else
         shader->setUniformInt(SHADER_APPLY_TINT, 0);
 
+    if (shaderFeatures & SH_FEAT_SATURATION) {
+        auto        xyzMatrix = SOURCE_IMAGE_DESCRIPTION->getPrimaries()->toXYZ();
+        const auto& xyz       = xyzMatrix.mat();
+        const float sum       = xyz[1][0] + xyz[1][1] + xyz[1][2];
+        shader->setUniformFloat(SHADER_WINDOW_SATURATION, data.saturation);
+        shader->setUniformFloat3(SHADER_WINDOW_SATURATION_WEIGHTS, xyz[1][0] / sum, xyz[1][1] / sum, xyz[1][2] / sum);
+    }
     return shader;
 }
 
@@ -1837,7 +1832,7 @@ void CHyprOpenGLImpl::renderTextureMatte(CRenderContext& ctx, SP<ITexture> tex, 
     // get transform
     const auto& glMatrix = g_pHyprRenderer->projectBoxToTarget(ctx, newBox);
 
-    auto        shader = useShader(getShaderVariant(SH_FRAG_MATTE, globalFeatures(ctx)));
+    auto        shader = useShader(getShaderVariant(SH_FRAG_MATTE, globalFeatures(ctx) | (tex->m_type == TEXTURE_EXTERNAL ? SH_FEAT_EXTERNAL : 0)));
     shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, glMatrix.getMatrix());
     shader->setUniformInt(SHADER_TEX, 0);
     shader->setUniformInt(SHADER_ALPHA_MATTE, 1);
@@ -1983,6 +1978,7 @@ void CHyprOpenGLImpl::renderTextureWithBlurInternal(CRenderContext& ctx, SP<ITex
 
                               .primarySurfaceUVTopLeft     = ctx.m_data.primarySurfaceUVTopLeft,
                               .primarySurfaceUVBottomRight = ctx.m_data.primarySurfaceUVBottomRight,
+                              .saturation                  = data.saturation,
                           });
 
     GLFB(ctx.m_data.currentFB)->invalidate({GL_DEPTH_STENCIL_ATTACHMENT});

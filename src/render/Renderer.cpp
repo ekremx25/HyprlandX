@@ -2128,7 +2128,9 @@ SCMSettings IHyprRenderer::getCMSettings(CRenderContext& ctx, const NColorManage
 
     const bool  needsSDRmod     = modifySDR && isSDR2HDR(ctx, imageDescription->value(), targetImageDescription->value());
     const bool  needsHDRmod     = !needsSDRmod && isHDR2SDR(imageDescription->value(), targetImageDescription->value());
-    const float maxLuminance    = needsHDRmod ?
+    // MaxCLL is an absolute content peak, unlike the encoding-volume maximum.
+    const bool  hasContentPeak  = srcTF == CM_TRANSFER_FUNCTION_ST2084_PQ && imageDescription->value().maxCLL > 0;
+    const float maxLuminance    = hasContentPeak ? std::min<float>(imageDescription->value().maxCLL, imageDescription->value().getTFMaxLuminance()) : needsHDRmod ?
         imageDescription->value().getTFMaxLuminance(-1) :
         (imageDescription->value().luminances.max > 0 ? imageDescription->value().luminances.max : imageDescription->value().luminances.reference);
     const auto  dstMaxLuminance = targetImageDescription->value().luminances.max > 0 ? targetImageDescription->value().luminances.max : 10000;
@@ -2156,7 +2158,7 @@ SCMSettings IHyprRenderer::getCMSettings(CRenderContext& ctx, const NColorManage
         .needsTonemap            = tonemapMode != 0 && needsTonemap,
         .tonemapMode             = tonemapMode,
         .maxLuminance            = needsTonemap && tonemapMode == 2 ? dstMaxLuminance :
-                                                                      maxLuminance * targetImageDescription->value().luminances.reference / imageDescription->value().luminances.reference,
+                                                                      (hasContentPeak ? maxLuminance : maxLuminance * targetImageDescription->value().luminances.reference / imageDescription->value().luminances.reference),
         .dstMaxLuminance         = dstMaxLuminance,
         .dstPrimaries2XYZ        = toXYZ.mat(),
         .needsSDRmod             = needsMod,

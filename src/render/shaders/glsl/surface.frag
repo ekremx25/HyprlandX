@@ -3,10 +3,17 @@
 #extension GL_ARB_shading_language_include : enable
 
 #include "defines.h"
+#if USE_EXTERNAL
+#extension GL_OES_EGL_image_external_essl3 : require
+#endif
 
 precision         highp float;
 in vec2           v_texcoord;
+#if USE_EXTERNAL
+uniform highp samplerExternalOES tex;
+#else
 uniform sampler2D tex;
+#endif
 #if USE_BLUR
 uniform vec2      uvSize;
 uniform vec2      uvOffset;
@@ -18,6 +25,10 @@ uniform sampler2D blurAlphaMatte;
 #endif
 
 uniform float alpha;
+#if USE_SATURATION
+uniform float windowSaturation;
+uniform vec3 windowSaturationWeights;
+#endif
 
 #if USE_DISCARD
 uniform bool  discardOpaque;
@@ -93,6 +104,12 @@ void main() {
         discard;
 #endif
 
+#if USE_SATURATION
+    // Operate on the client sample only, before color management and background blending.
+    float gray = dot(pixColor.rgb, windowSaturationWeights);
+    float peak = max(pixColor.a, max(pixColor.r, max(pixColor.g, pixColor.b)));
+    pixColor.rgb = clamp(mix(vec3(gray), pixColor.rgb, windowSaturation), vec3(0.0), vec3(peak));
+#endif
 #if USE_CM
 #if USE_MIRROR
     vec4[2] pixColors =

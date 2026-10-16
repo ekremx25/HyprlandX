@@ -16,6 +16,7 @@
 #include <hyprutils/string/VarList.hpp>
 #include <hyprutils/string/VarList2.hpp>
 #include <algorithm>
+#include <cmath>
 #include <format>
 #include <numbers>
 
@@ -289,6 +290,14 @@ static std::expected<WindowRuleEffectValue, std::string> parseWindowRuleEffect(C
         case WINDOW_RULE_EFFECT_SUPPRESSEVENT: return parseStringList(raw);
 
         case WINDOW_RULE_EFFECT_CONTENT: return sc<int64_t>(NContentType::fromString(raw));
+        case WINDOW_RULE_EFFECT_SATURATION: {
+            auto parsed = parseFloat(EFFECT_NAME, raw);
+            if (!parsed)
+                return std::unexpected(parsed.error());
+            if (!std::isfinite(*parsed) || *parsed < 0.F || *parsed > 2.F)
+                return std::unexpected(std::format("{} rule must be finite and between 0 and 2", EFFECT_NAME));
+            return *parsed;
+        }
         case WINDOW_RULE_EFFECT_TONEMAP: {
             if (raw == "1" || raw == "on")
                 return 1;

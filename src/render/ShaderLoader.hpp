@@ -27,6 +27,8 @@ namespace Render {
         SH_FEAT_BLUR_ALPHA_MASK = (1 << 11), // condition: transformed-window shader blur blend
         SH_FEAT_BLUR_MATTE      = (1 << 12), // condition: transformed-window blur matte
         SH_FEAT_ALT_TONEMAP     = (1 << 13), // condition: tonemapMode == 3
+        SH_FEAT_SATURATION      = (1 << 15), // opt-in client-surface saturation
+        SH_FEAT_EXTERNAL        = (1 << 14), // external EGLImage sampling
 
         // uniforms: targetPrimariesXYZ; condition: SH_FEAT_TONEMAP || SH_FEAT_SDR_MOD
     };

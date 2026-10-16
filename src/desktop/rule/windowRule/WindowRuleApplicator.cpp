@@ -39,6 +39,7 @@ CWindowRuleApplicator::CWindowRuleApplicator(PHLWINDOW w) : m_window(w) {
 std::unordered_set<CWindowRuleEffectContainer::storageType> CWindowRuleApplicator::resetProps(std::underlying_type_t<eRuleProperty> props, Types::eOverridePriority prio) {
     std::unordered_set<CWindowRuleEffectContainer::storageType> effectsNuked;
 
+    resetRuleProp(m_saturation, props, prio, effectsNuked, [this] { return saturationEffect(); });
     std::apply(
         [&](auto&&... prop) { (resetRuleProp(prop.first.get(), props, prio, effectsNuked, prop.second), ...); },
         std::make_tuple(
@@ -376,6 +377,11 @@ CWindowRuleApplicator::SRuleResult CWindowRuleApplicator::applyDynamicRule(const
             case WINDOW_RULE_EFFECT_NO_AUTO_HDR: {
                 m_noAutoHDR.first.set(std::get<bool>(value), Types::PRIORITY_WINDOW_RULE);
                 m_noAutoHDR.second |= rule->getPropertiesMask();
+                break;
+            }
+            case WINDOW_RULE_EFFECT_SATURATION: {
+                m_saturation.first.set(std::get<float>(value), Types::PRIORITY_WINDOW_RULE);
+                m_saturation.second |= rule->getPropertiesMask();
                 break;
             }
             case WINDOW_RULE_EFFECT_TONEMAP: {

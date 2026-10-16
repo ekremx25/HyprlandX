@@ -1,5 +1,6 @@
 #include "Format.hpp"
 #include <vector>
+#include <algorithm>
 #include "../includes.hpp"
 #include "debug/log/Logger.hpp"
 #include "../macros.hpp"
@@ -38,6 +39,7 @@ bool NFormatUtils::isFormatYUV(uint32_t drmFormat) {
         case DRM_FORMAT_VYUY:
         case DRM_FORMAT_AYUV:
         case DRM_FORMAT_NV12:
+        case DRM_FORMAT_P010:
         case DRM_FORMAT_NV21:
         case DRM_FORMAT_NV16:
         case DRM_FORMAT_NV61:
@@ -114,4 +116,35 @@ DRMFormat NFormatUtils::alphaFormat(DRMFormat prevFormat) {
         case DRM_FORMAT_BGRX1010102: return DRM_FORMAT_BGRA1010102;
         default: return 0;
     }
+}
+
+std::optional<std::vector<uint64_t>> NFormatUtils::getTexture2DModifiers(std::span<const uint64_t> modifiers, std::span<const EGLBoolean> externalOnly) {
+    if (modifiers.empty())
+        return std::vector<uint64_t>{};
+
+    std::vector<uint64_t> result;
+    // reserve number of elements to avoid reallocations
+    result.reserve(modifiers.size());
+
+    bool linearIsExternal = false;
+    for (size_t i = 0; i < std::min(modifiers.size(), externalOnly.size()); ++i) {
+        if (externalOnly[i]) {
+            if (modifiers[i] == DRM_FORMAT_MOD_LINEAR)
+                linearIsExternal = true;
+            continue;
+        }
+
+        result.push_back(modifiers[i]);
+    }
+
+    // An external-only format cannot be sampled by our GL_TEXTURE_2D renderer,
+    // even if importing it without an explicit modifier succeeds.
+    if (result.empty())
+        return std::nullopt;
+
+    // if the driver doesn't mark linear as external, add it. It's allowed unless the driver says otherwise. (e.g. nvidia)
+    if (!linearIsExternal && std::ranges::find(modifiers, DRM_FORMAT_MOD_LINEAR) == modifiers.end())
+        result.push_back(DRM_FORMAT_MOD_LINEAR);
+
+    return result;
 }

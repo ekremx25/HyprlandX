@@ -66,6 +66,7 @@ CGLTexture::CGLTexture(uint32_t drmFormat, uint8_t* pixels, uint32_t stride, con
 }
 
 CGLTexture::CGLTexture(const Aquamarine::SDMABUFAttrs& attrs, void* image, bool opaque) {
+    m_eglImage = image;
     m_opaque = opaque;
     if (!g_pHyprOpenGL->m_proc.glEGLImageTargetTexture2DOES) {
         LOG(Log::ERR, "Cannot create a dmabuf texture: no glEGLImageTargetTexture2DOES");
@@ -74,18 +75,19 @@ CGLTexture::CGLTexture(const Aquamarine::SDMABUFAttrs& attrs, void* image, bool 
 
     m_opaque = isDrmFormatOpaque(attrs.format);
 
-    // #TODO external only formats should be external as well.
-    // also needs a separate color shader.
-    /*if (NFormatUtils::isFormatYUV(attrs.format)) {
+    if (NFormatUtils::isFormatYUV(attrs.format)) {
+        if (!g_pHyprOpenGL->m_exts.OES_EGL_image_external_essl3) {
+            LOG(Log::ERR, "Cannot sample a YUV dmabuf without external EGLImage shader support");
+            return;
+        }
         m_target = GL_TEXTURE_EXTERNAL_OES;
         m_type   = TEXTURE_EXTERNAL;
-    } else {*/
-    m_target = GL_TEXTURE_2D;
-    m_type   = isDrmFormatOpaque(attrs.format) ? TEXTURE_RGBX : TEXTURE_RGBA;
-    //}
+    } else {
+        m_target = GL_TEXTURE_2D;
+        m_type   = m_opaque ? TEXTURE_RGBX : TEXTURE_RGBA;
+    }
 
     allocate(attrs.size, attrs.format);
-    m_eglImage = image;
 
     bind();
     setTexParameter(GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -205,6 +207,10 @@ constexpr std::optional<size_t> CGLTexture::getCacheStateIndex(GLenum pname) {
 }
 
 void CGLTexture::setTexParameter(GLenum pname, GLint param) {
+    // External EGLImages only allow clamp-to-edge wrapping.
+    if (m_target == GL_TEXTURE_EXTERNAL_OES && (pname == GL_TEXTURE_WRAP_S || pname == GL_TEXTURE_WRAP_T))
+        param = GL_CLAMP_TO_EDGE;
+
     const auto cacheIndex = getCacheStateIndex(pname);
 
     if (!cacheIndex) {

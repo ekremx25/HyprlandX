@@ -8,6 +8,7 @@
 #include <config/shared/inotify/ConfigWatcher.hpp>
 #include <event/EventBus.hpp>
 #include <managers/eventLoop/EventLoopManager.hpp>
+#include <managers/TokenManager.hpp>
 #include <output/MonitorResources.hpp>
 #include <render/Renderer.hpp>
 #include <render/SceneResources.hpp>
@@ -1474,3 +1475,62 @@ TEST_P(CMesaDMABUFRejectedTest, ClosesIncomingPrimeFD) {
 
 INSTANTIATE_TEST_SUITE_P(InvalidDimensionsAndOffset, CMesaDMABUFRejectedTest,
                          ::testing::Values(std::array<int32_t, 3>{0, 1, 0}, std::array<int32_t, 3>{1, 0, 0}, std::array<int32_t, 3>{1, 1, -1}));
+
+
+TEST_F(CRenderLifecycleTest, ScanoutFeedbackRequiresRendererFallback) {
+    auto previousTokens = std::move(g_pTokenManager);
+    const Hyprutils::Utils::CScopeGuard restoreTokens{[&] { g_pTokenManager = std::move(previousTokens); }};
+    g_pTokenManager = makeUnique<CTokenManager>();
+    constexpr uint64_t supported = 0x0200000000082305ULL;
+    constexpr uint64_t externalOnly = 0x0200000000042305ULL;
+    const SDMABUFTranche renderer = {
+        .formats = {{.drmFormat = DRM_FORMAT_XRGB2101010, .modifiers = {supported}}},
+    };
+    const SDMABUFTranche scanout = {
+        .flags = ZWP_LINUX_DMABUF_FEEDBACK_V1_TRANCHE_FLAGS_SCANOUT,
+        .formats = {
+            {.drmFormat = DRM_FORMAT_XRGB2101010, .modifiers = {supported, externalOnly}},
+            {.drmFormat = DRM_FORMAT_P010, .modifiers = {supported}},
+        },
+    };
+    const CDMABUFFormatTable table(renderer, {{m_monitor, scanout}});
+    ASSERT_TRUE(table.m_tableFD.isValid());
+    ASSERT_EQ(table.m_monitorTranches.size(), 1U);
+    EXPECT_EQ(table.m_monitorTranches[0].second.indices.size(), 1U);
+    EXPECT_EQ(table.m_tableSize, sizeof(SDMABUFFormatTableEntry));
+    EXPECT_EQ(table.m_monitorTranches[0].second.indices, table.m_rendererTranche.indices);
+}
+
+TEST_F(CRenderLifecycleTest, ContentLightLevelControlsPQTonemapPeak) {
+    using namespace NColorManagement;
+    struct SCase {
+        uint32_t maxCLL;
+        bool sdrTarget;
+        bool needsTonemap;
+        float peak;
+    };
+    const std::array<SCase, 6> cases = {{
+        {203, false, false, 203.F},
+        {486, false, false, 486.F},
+        {1000, false, true, 1000.F},
+        {0, false, true, 1000.F},
+        {203, true, true, 203.F},
+        {20000, false, true, 10000.F},
+    }};
+    auto& ctx = renderer().context();
+    ctx.m_data.pMonitor = m_monitor;
+    for (const auto& test : cases) {
+        SCOPED_TRACE(::testing::Message() << "MaxCLL=" << test.maxCLL << " SDR=" << test.sdrTarget);
+        auto src = BT2100_IMAGE_DESCRIPTION->value();
+        src.luminances = {.min = 0.F, .max = 1000, .reference = 203};
+        src.maxCLL = test.maxCLL;
+        auto dst = LINEAR_NN_IMAGE_DESCRIPTION->value();
+        dst.transferFunction = test.sdrTarget ? CM_TRANSFER_FUNCTION_SRGB : CM_TRANSFER_FUNCTION_LINEAR;
+        dst.luminances = {.min = 0.F, .max = test.sdrTarget ? 80U : 486U, .reference = test.sdrTarget ? 80U : 203U};
+        renderer().clearCMSettingsCache(ctx);
+        const auto settings = renderer().getCMSettings(ctx, CImageDescription::from(src), CImageDescription::from(dst));
+        EXPECT_EQ(settings.needsTonemap, test.needsTonemap);
+        EXPECT_FLOAT_EQ(settings.maxLuminance, test.peak);
+        EXPECT_EQ(settings.sourceTF, CM_TRANSFER_FUNCTION_ST2084_PQ);
+    }
+}

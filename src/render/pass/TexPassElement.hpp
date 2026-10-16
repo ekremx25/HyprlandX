@@ -64,6 +64,7 @@ class CTexPassElement : public IPassElement {
 
         CRegion                           clipRegion;
         PHLLSREF                          currentLS;
+        float                             saturation = 1.F;
         PHLWINDOWREF                      blurOwner;
 
         SP<Render::ITexture>              blurredBG;

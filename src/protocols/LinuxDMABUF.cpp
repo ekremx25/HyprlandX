@@ -76,6 +76,11 @@ CDMABUFFormatTable::CDMABUFFormatTable(SDMABUFTranche _rendererTranche, std::vec
                 // apparently these can implode on planes, so don't use them
                 if (mod == DRM_FORMAT_MOD_INVALID || mod == DRM_FORMAT_MOD_LINEAR)
                     continue;
+                // Scanout may end at any frame; the same buffer must also be compositable.
+                if (std::ranges::none_of(m_rendererTranche.formats, [&](const SDRMFormat& renderFormat) {
+                        return renderFormat.drmFormat == fmt.drmFormat && std::ranges::find(renderFormat.modifiers, mod) != renderFormat.modifiers.end();
+                    }))
+                    continue;
                 auto [_, inserted] = formats.emplace(fmt.drmFormat, mod);
                 if (inserted) {
                     tranche.indices.push_back(i++);

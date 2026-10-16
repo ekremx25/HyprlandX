@@ -1993,6 +1993,12 @@ uint16_t CMonitor::isDSBlocked(bool full) {
             return reasons;
     }
 
+    if (PCANDIDATE->m_ruleApplicator->saturation().valueOrDefault() != 1.F) {
+        reasons |= DS_BLOCK_CM;
+        if (!full)
+            return reasons;
+    }
+
     const auto PSURFACE = PCANDIDATE->getSolitaryResource();
     if (!PSURFACE || !PSURFACE->m_current.texture || !PSURFACE->m_current.buffer) {
         reasons |= DS_BLOCK_SURFACE;
