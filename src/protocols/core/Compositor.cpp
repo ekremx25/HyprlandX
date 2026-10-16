@@ -9,6 +9,7 @@
 #include "Subcompositor.hpp"
 #include "../Viewporter.hpp"
 #include "../../output/Monitor.hpp"
+#include "../../helpers/cm/ClientImageDescription.hpp"
 #include "../PresentationTime.hpp"
 #include "../DRMSyncobj.hpp"
 #include "../types/DMABuffer.hpp"
@@ -720,7 +721,7 @@ PImageDescription CWLSurfaceResource::getPreferredImageDescription() {
     else if (m_hlSurface.valid() && WINDOW)
         monitor = WINDOW->m_monitor;
 
-    return monitor ? monitor->m_imageDescription : g_pCompositor->getPreferredImageDescription();
+    return monitor ? clientImageDescription(monitor) : g_pCompositor->getPreferredImageDescription();
 }
 
 void CWLSurfaceResource::sortSubsurfaces() {

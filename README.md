@@ -33,6 +33,11 @@ easy IPC, much more QoL stuff than other compositors and more...
 
 </div>
 
+# HyprlandX HDR changes
+
+This fork includes HDR video fixes and Chromium/Edge SDR reference-white feedback.
+See [HDR changes and validation](docs/HDR-FORK.md) for details.
+
 # Features
 
 - All of the eyecandy: gradient borders, many types of blur, animations, glow, shadows and much more

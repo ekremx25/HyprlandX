@@ -1,6 +1,7 @@
 
 #include "Compositor.hpp"
 #include "helpers/MiscFunctions.hpp"
+#include "helpers/cm/ClientImageDescription.hpp"
 #include "render/decorations/DecorationPositioner.hpp"
 #include "config/supplementary/executor/Executor.hpp"
 #include "debug/log/Logger.hpp"
@@ -983,7 +984,7 @@ PImageDescription CCompositor::getPreferredImageDescription() {
     }
     LOG(Log::WARN, "FIXME: color management protocol is enabled, determine correct preferred image description");
     // should determine some common settings to avoid unnecessary transformations while keeping maximum displayable precision
-    return State::monitorState()->monitors().size() == 1 ? State::monitorState()->monitors()[0]->m_imageDescription :
+    return State::monitorState()->monitors().size() == 1 ? clientImageDescription(State::monitorState()->monitors()[0]) :
                                                            CImageDescription::from(SImageDescription{.primaries = NColorPrimaries::BT709});
 }
 

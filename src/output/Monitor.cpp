@@ -39,6 +39,7 @@
 #include "../layout/algorithm/Algorithm.hpp"
 #include "../i18n/Engine.hpp"
 #include "../helpers/cm/ColorManagement.hpp"
+#include "../helpers/cm/ClientImageDescription.hpp"
 #include "../state/MonitorState.hpp"
 #include "../state/MonitorLayoutController.hpp"
 #include "../state/WorkspacePlacementController.hpp"
@@ -618,6 +619,7 @@ void CMonitor::applyCMType(NCMType::eCMType cmType, NTransferFunction::eTF cmSdr
 }
 
 bool CMonitor::applyMonitorRuleSoft(Config::CMonitorRule&& pMonitorRule) {
+    const auto oldClientDescription = clientImageDescription(m_self);
     m_activeMonitorRule = std::move(pMonitorRule);
     m_reservedArea.setStatic(m_activeMonitorRule.m_reservedArea);
     m_transform         = m_activeMonitorRule.m_transform;
@@ -645,10 +647,10 @@ bool CMonitor::applyMonitorRuleSoft(Config::CMonitorRule&& pMonitorRule) {
         m_maxLuminance    = m_activeMonitorRule.m_maxLuminance;
         m_maxAvgLuminance = m_activeMonitorRule.m_maxAvgLuminance;
 
-        applyCMType(m_cmType, m_sdrEotf);
-
         m_sdrSaturation = m_activeMonitorRule.m_sdrSaturation;
         m_sdrBrightness = m_activeMonitorRule.m_sdrBrightness;
+
+        applyCMType(m_cmType, m_sdrEotf);
     } else {
         auto image = NColorManagement::SImageDescription::fromICC(m_activeMonitorRule.m_iccFile);
         if (!image) {
@@ -663,6 +665,9 @@ bool CMonitor::applyMonitorRuleSoft(Config::CMonitorRule&& pMonitorRule) {
             }
         }
     }
+
+    if (PROTO::colorManagement && oldClientDescription != clientImageDescription(m_self))
+        PROTO::colorManagement->onMonitorImageDescriptionChanged(m_self);
 
     Vector2D xfmd     = m_transform % 2 == 1 ? Vector2D{m_pixelSize.y, m_pixelSize.x} : m_pixelSize;
     m_size            = (xfmd / m_scale).round();
