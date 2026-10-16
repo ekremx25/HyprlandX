@@ -29,6 +29,25 @@ working-buffer path retain their existing behavior. No new option is required.
 SDR saturation is a separate appearance adjustment and is not represented by
 reference-white metadata.
 
+## SDR screenshots and PipeWire capture
+
+PQ surfaces now use their own reference white when producing the SDR mirror
+copy. Previously this path divided by a fixed 80 nit white, washing out PQ
+browser content at 203 or 301 nits. The mirror is generated before display tone
+mapping; scanout retains its existing tone mapping and HDR luminance.
+
+This corrects SDR desktop content carried inside PQ surfaces. It does not add
+highlight compression for genuine HDR content above reference white, or change
+the capture protocol to deliver HDR metadata. Selecting Rec.2100 PQ in OBS does
+not by itself make its PipeWire source a native HDR source.
+
+GPU regression tests exercise the production shader with 80, 203, and 301 nit
+reference whites, colored pixels, premultiplied alpha, unchanged SDR capture,
+and unchanged HDR display output. All 676 tests passed. A real Edge PQ surface
+captured with grim reproduced the issue before the fix: #808080 became
+#e9e9e9. With the fix it captured as #808080; primary color samples were within
+one 8-bit code value of the original page.
+
 ## Validation and versions
 
 The fix was first validated on a patched v0.56.2 desktop: the user confirmed that
@@ -49,6 +68,7 @@ Build with the dependencies documented by Hyprland:
 
 ```sh
 git submodule update --init --recursive
+bash scripts/generateShaderIncludes.sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWITH_TESTS=ON
 cmake --build build --target Hyprland hyprland_gtests --parallel
 ./build/hyprland_gtests

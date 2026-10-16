@@ -116,7 +116,7 @@ void main() {
 #else
     pixColor =
 #endif
-        doColorManagement(pixColor, alpha, sourceTF, targetTF, convertMatrix, srcTFRange, dstTFRange, 0.0
+        doColorManagement(pixColor, alpha, sourceTF, targetTF, convertMatrix, srcTFRange, dstTFRange, 0.0, srcRefLuminance
 #if USE_ICC
                           ,
                           iccLut3D, iccLutSize
@@ -127,7 +127,7 @@ void main() {
 #endif
 #if USE_TONEMAP
                           ,
-                          maxLuminance, dstMaxLuminance, dstRefLuminance, srcRefLuminance, tonemapMode
+                          maxLuminance, dstMaxLuminance, dstRefLuminance, tonemapMode
 #endif
 #if USE_SDR_MOD
                           ,
