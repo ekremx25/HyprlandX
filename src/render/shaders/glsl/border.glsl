@@ -102,7 +102,7 @@ vec4
     pixColor.rgb *= pixColor[3];
 
 #if USE_CM
-    return doColorManagement(pixColor, alpha * additionalAlpha, sourceTF, targetTF, convertMatrix, srcTFRange, dstTFRange, 0.0
+    return doColorManagement(pixColor, alpha * additionalAlpha, sourceTF, targetTF, convertMatrix, srcTFRange, dstTFRange, 0.0, srcRefLuminance
 #if USE_ICC
                              ,
                              iccLut3D, iccLutSize
@@ -113,7 +113,7 @@ vec4
 #endif
 #if USE_TONEMAP
                              ,
-                             maxLuminance, dstMaxLuminance, dstRefLuminance, srcRefLuminance, tonemapMode
+                             maxLuminance, dstMaxLuminance, dstRefLuminance, tonemapMode
 #endif
 #if USE_SDR_MOD
                              ,
