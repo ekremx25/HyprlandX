@@ -9,6 +9,7 @@
 #include "Subcompositor.hpp"
 #include "../Viewporter.hpp"
 #include "../../output/Monitor.hpp"
+#include "../../helpers/cm/ClientImageDescription.hpp"
 #include "../PresentationTime.hpp"
 #include "../DRMSyncobj.hpp"
 #include "../types/DMABuffer.hpp"
@@ -729,7 +730,7 @@ PImageDescription CWLSurfaceResource::getPreferredImageDescription() {
         return g_pCompositor->getPreferredImageDescription();
 
     // auto HDR only switches once a fullscreen client submits HDR content, so offer it the description it would switch to
-    return monitor->getAutoHDRImageDescription(parent.lock()).value_or(monitor->m_imageDescription);
+    return monitor->getAutoHDRImageDescription(parent.lock()).value_or(clientImageDescription(monitor));
 }
 
 void CWLSurfaceResource::sortSubsurfaces() {

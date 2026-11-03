@@ -3,10 +3,17 @@
 #extension GL_ARB_shading_language_include : enable
 
 #include "defines.h"
+#if USE_EXTERNAL
+#extension GL_OES_EGL_image_external_essl3 : require
+#endif
 
 precision         highp float;
 in vec2           v_texcoord; // is in 0-1
+#if USE_EXTERNAL
+uniform highp samplerExternalOES tex;
+#else
 uniform sampler2D tex;
+#endif
 uniform sampler2D texMatte;
 
 layout(location = 0) out vec4 fragColor;

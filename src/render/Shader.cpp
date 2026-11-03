@@ -193,6 +193,8 @@ void CShader::getUniformLocations() {
     m_uniformLocations[SHADER_SHADOW_POWER]                = getUniform("shadowPower");
     m_uniformLocations[SHADER_USE_ALPHA_MATTE]             = getUniform("useAlphaMatte");
     m_uniformLocations[SHADER_APPLY_TINT]                  = getUniform("applyTint");
+    m_uniformLocations[SHADER_WINDOW_SATURATION]           = getUniform("windowSaturation");
+    m_uniformLocations[SHADER_WINDOW_SATURATION_WEIGHTS]   = getUniform("windowSaturationWeights");
     m_uniformLocations[SHADER_TINT]                        = getUniform("tint");
     m_uniformLocations[SHADER_GRADIENT]                    = getUniform("gradient");
     m_uniformLocations[SHADER_GRADIENT_LENGTH]             = getUniform("gradientLength");

@@ -355,6 +355,7 @@ void IElementRenderer::drawSurface(CRenderContext& ctx, WP<CSurfacePassElement> 
                             .discardOpacity        = m_data.discardOpacity,
                             .clipRegion            = clipRegion,
                             .currentLS             = m_data.pLS,
+                            .saturation            = m_data.pWindow ? m_data.pWindow->m_ruleApplicator->saturation().valueOrDefault() : 1.F,
                             .blurOwner             = m_data.pWindow,
                             .workspacePresentation = m_data.workspacePresentation,
                         }),
@@ -377,6 +378,7 @@ void IElementRenderer::drawSurface(CRenderContext& ctx, WP<CSurfacePassElement> 
                             .discardOpacity        = m_data.discardOpacity,
                             .clipRegion            = clipRegion,
                             .currentLS             = m_data.pLS,
+                            .saturation            = m_data.pWindow ? m_data.pWindow->m_ruleApplicator->saturation().valueOrDefault() : 1.F,
                             .workspacePresentation = m_data.workspacePresentation,
                         }),
                         surfaceDamage());
@@ -401,6 +403,7 @@ void IElementRenderer::drawSurface(CRenderContext& ctx, WP<CSurfacePassElement> 
                             .discardOpacity        = m_data.discardOpacity,
                             .clipRegion            = clipRegion,
                             .currentLS             = m_data.pLS,
+                            .saturation            = m_data.pWindow ? m_data.pWindow->m_ruleApplicator->saturation().valueOrDefault() : 1.F,
                             .workspacePresentation = m_data.workspacePresentation,
                         }),
                         surfaceDamage());
@@ -421,6 +424,7 @@ void IElementRenderer::drawSurface(CRenderContext& ctx, WP<CSurfacePassElement> 
                             .discardOpacity        = m_data.discardOpacity,
                             .clipRegion            = clipRegion,
                             .currentLS             = m_data.pLS,
+                            .saturation            = m_data.pWindow ? m_data.pWindow->m_ruleApplicator->saturation().valueOrDefault() : 1.F,
                             .workspacePresentation = m_data.workspacePresentation,
                         }),
                         surfaceDamage());

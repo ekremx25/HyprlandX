@@ -4,6 +4,7 @@
 #include "../output/Monitor.hpp"
 #include "core/Output.hpp"
 #include "../helpers/cm/ColorManagement.hpp"
+#include "../helpers/cm/ClientImageDescription.hpp"
 #include <cstdint>
 
 using namespace NColorManagement;
@@ -269,7 +270,7 @@ CColorManagementOutput::CColorManagementOutput(SP<CWpColorManagementOutputV1> re
         if (!m_output || !m_output->m_monitor.valid())
             RESOURCE->m_resource->sendFailed(WP_IMAGE_DESCRIPTION_V1_CAUSE_NO_OUTPUT, "No output");
         else {
-            RESOURCE->m_settings = m_output->m_monitor->m_imageDescription;
+            RESOURCE->m_settings = clientImageDescription(m_output->m_monitor);
 
             RESOURCE->sendMaybeReady();
         }

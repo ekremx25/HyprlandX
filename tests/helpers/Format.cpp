@@ -6,6 +6,7 @@
 #include <wayland-server-protocol.h>
 #include <hyprgraphics/egl/Egl.hpp>
 #include <limits>
+#include <array>
 
 using namespace Hyprgraphics::Egl;
 using namespace NFormatUtils;
@@ -31,6 +32,12 @@ TEST(Helpers, formatIsFormatYUV) {
     EXPECT_TRUE(isFormatYUV(DRM_FORMAT_NV21));
     EXPECT_FALSE(isFormatYUV(DRM_FORMAT_XRGB8888));
     EXPECT_FALSE(isFormatYUV(DRM_FORMAT_ARGB8888));
+}
+
+TEST(Helpers, formatP010IsYUVNotRGB10) {
+    EXPECT_TRUE(isFormatYUV(DRM_FORMAT_P010));
+    EXPECT_FALSE(isFormatYUV(DRM_FORMAT_XRGB2101010));
+    EXPECT_FALSE(isFormatYUV(DRM_FORMAT_ARGB2101010));
 }
 
 TEST(Helpers, formatGetPixelFormatFromDRM) {
@@ -95,4 +102,46 @@ TEST(Helpers, formatAlphaFormat) {
     EXPECT_EQ(alphaFormat(DRM_FORMAT_XBGR8888), DRM_FORMAT_ABGR8888);
     // Format without alpha stripped entry returns DRM_FORMAT_INVALID (0)
     EXPECT_EQ(alphaFormat(DRM_FORMAT_ARGB8888), 0u);
+}
+
+TEST(Helpers, formatTexture2DRejectsExternalOnlyVideo) {
+    const std::array<uint64_t, 2>   modifiers = {0x0200000000082305ULL, DRM_FORMAT_MOD_LINEAR};
+    const std::array<EGLBoolean, 2> external  = {EGL_TRUE, EGL_TRUE};
+    EXPECT_FALSE(getTexture2DModifiers(modifiers, external).has_value());
+}
+
+TEST(Helpers, formatTexture2DRejectsExternalOnlyWithoutLinear) {
+    const std::array<uint64_t, 1>   modifiers = {0x0200000000082305ULL};
+    const std::array<EGLBoolean, 1> external  = {EGL_TRUE};
+    EXPECT_FALSE(getTexture2DModifiers(modifiers, external).has_value());
+}
+
+TEST(Helpers, formatTexture2DPreservesRGBAndLinear) {
+    const std::array<uint64_t, 2>   modifiers = {0x0200000000082305ULL, DRM_FORMAT_MOD_LINEAR};
+    const std::array<EGLBoolean, 2> external  = {EGL_FALSE, EGL_FALSE};
+    const auto                      result    = getTexture2DModifiers(modifiers, external);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, (std::vector<uint64_t>{modifiers[0], DRM_FORMAT_MOD_LINEAR}));
+}
+
+TEST(Helpers, formatTexture2DFiltersExternalLinearFromMixedSupport) {
+    const std::array<uint64_t, 2>   modifiers = {0x0200000000082305ULL, DRM_FORMAT_MOD_LINEAR};
+    const std::array<EGLBoolean, 2> external  = {EGL_FALSE, EGL_TRUE};
+    const auto                      result    = getTexture2DModifiers(modifiers, external);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, (std::vector<uint64_t>{modifiers[0]}));
+}
+
+TEST(Helpers, formatTexture2DPreservesImplicitOnlyFallback) {
+    const auto result = getTexture2DModifiers({}, {});
+    ASSERT_TRUE(result.has_value());
+    EXPECT_TRUE(result->empty());
+}
+
+TEST(Helpers, formatTexture2DKeepsLinearFallbackForSupportedFormat) {
+    const std::array<uint64_t, 1>   modifiers = {0x0200000000082305ULL};
+    const std::array<EGLBoolean, 1> external  = {EGL_FALSE};
+    const auto                      result    = getTexture2DModifiers(modifiers, external);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, (std::vector<uint64_t>{modifiers[0], DRM_FORMAT_MOD_LINEAR}));
 }

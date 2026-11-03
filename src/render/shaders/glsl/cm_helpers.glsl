@@ -209,7 +209,7 @@ vec4[2]
 #else
 vec4
 #endif
-    doColorManagement(vec4 pixColor, float additionalAlpha, int srcTF, int dstTF, mat3 convertMatrix, vec2 srcTFRange, vec2 dstTFRange, float linearNoise
+    doColorManagement(vec4 pixColor, float additionalAlpha, int srcTF, int dstTF, mat3 convertMatrix, vec2 srcTFRange, vec2 dstTFRange, float linearNoise, float srcRefLuminance
 #if USE_ICC
                       ,
                       highp sampler3D iccLut3D, float iccLutSize
@@ -220,7 +220,7 @@ vec4
 #endif
 #if USE_TONEMAP
                        ,
-                       float maxLuminance, float dstMaxLuminance, float dstRefLuminance, float srcRefLuminance, int tonemapMode
+                       float maxLuminance, float dstMaxLuminance, float dstRefLuminance, int tonemapMode
 #endif
 #if USE_SDR_MOD
                        ,
@@ -245,15 +245,20 @@ vec4
         pixColor = toNit(pixColor, srcTFRange);
     pixColor.a   = finalAlpha;
     pixColor.rgb *= pixColor.a;
+#if USE_MIRROR
+    // The capture copy is SDR, independent of display tone mapping and SDR gain.
+    // PQ desktops may use a reference white above 80 nits; dividing by 80 clips
+    // their colors even though the same SDR content captures correctly as sRGB.
+    vec2 mirrorRange = srcTF == CM_TRANSFER_FUNCTION_GAMMA22 || srcTF == CM_TRANSFER_FUNCTION_SRGB ? srcTFRange : vec2(SDR_MIN_LUMINANCE, SDR_MAX_LUMINANCE);
+    if (srcTF == CM_TRANSFER_FUNCTION_ST2084_PQ && srcRefLuminance > 0.0)
+        mirrorRange = vec2(0.0, srcRefLuminance);
+    // TODO: compress HDR highlights above reference white into the SDR range.
+    vec4 mirrorColor = fromLinearNit(pixColor, CM_TRANSFER_FUNCTION_SRGB, mirrorRange);
+#endif
 #if USE_TONEMAP
     pixColor = tonemap(pixColor, dstxyz, maxLuminance, dstMaxLuminance, dstRefLuminance, srcRefLuminance, tonemapMode);
 #endif
 
-#if USE_MIRROR
-    // TODO HDR -> SDR tonemap
-    vec4 mirrorColor = fromLinearNit(pixColor, CM_TRANSFER_FUNCTION_SRGB,
-                                     srcTF == CM_TRANSFER_FUNCTION_GAMMA22 || srcTF == CM_TRANSFER_FUNCTION_SRGB ? srcTFRange : vec2(SDR_MIN_LUMINANCE, SDR_MAX_LUMINANCE));
-#endif
     pixColor = fromLinearNit(pixColor, dstTF, dstTFRange);
 #if USE_SDR_MOD
     pixColor = saturate(pixColor, dstxyz, sdrSaturation);

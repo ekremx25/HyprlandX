@@ -113,6 +113,7 @@ void CGLElementRenderer::draw(CRenderContext& ctx, WP<CTexPassElement> element, 
 
                                      .primarySurfaceUVTopLeft     = ctx.m_data.primarySurfaceUVTopLeft,
                                      .primarySurfaceUVBottomRight = ctx.m_data.primarySurfaceUVBottomRight,
+                                     .saturation                  = m_data.saturation,
                                      .motionBlur                  = m_data.motionBlur,
                                  });
 };
