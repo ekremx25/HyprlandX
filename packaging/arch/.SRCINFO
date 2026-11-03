@@ -84,7 +84,7 @@ pkgbase = hyprland
 	provides = wayland-compositor
 	options = !debug
 	options = !lto
-	source = HyprlandX::git+https://github.com/ekremx25/HyprlandX.git#tag=v0.57.0-hdrfix2
+	source = HyprlandX::git+https://github.com/ekremx25/HyprlandX.git#tag=v0.57.0-hdrfix2-1
 	sha256sums = SKIP
 
 pkgname = hyprland

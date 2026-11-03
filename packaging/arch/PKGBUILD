@@ -1,0 +1,34 @@
+pkgname=hyprland
+pkgver=0.57.0.hdrfix2
+pkgrel=1
+pkgdesc='Hyprland 0.57.0 with HDR fixes, rebuilt for Aquamarine 0.16 and Hyprgraphics 0.6'
+arch=('x86_64')
+url='https://github.com/ekremx25/HyprlandX'
+license=('BSD-3-Clause')
+provides=('wayland-compositor')
+options=('!debug' '!lto')
+depends=(cairo aquamarine libgcc libstdc++ glibc glib2 glslang hyprcursor hyprgraphics hyprland-guiutils hyprlang hyprutils hyprwire lcms2 libcanberra libdrm libei libglvnd libinput libx11 libxcb libxcomposite libxcursor libxfixes libxkbcommon libxrender lua mesa muparser opengl-driver pango pixman re2 sdbus-cpp tomlplusplus util-linux-libs wayland wayland-protocols xcb-proto xcb-util xcb-util-errors xcb-util-image xcb-util-keysyms xcb-util-renderutil xcb-util-wm xorg-xwayland libEGL.so=1-64 libGLESv2.so=2-64 libaquamarine.so=15-64 libcanberra.so=0-64 libeis.so=1-64 libgio-2.0.so=0-64 libgobject-2.0.so=0-64 libhyprcursor.so=0-64 libhyprgraphics.so=5-64 libhyprlang.so libhyprutils.so=13-64 libhyprwire.so=3-64 liblcms2.so=2-64 libpango-1.0.so=0-64 libpangocairo-1.0.so=0-64 libpixman-1.so=0-64 libre2.so=11-64 libreadline.so=8-64 libsdbus-c++.so=2-64 libtomlplusplus.so libuuid.so=1-64 libwayland-server.so=0-64 libxkbcommon.so=0-64)
+makedepends=('git' 'cmake' 'ninja' 'python' 'hyprwayland-scanner>=0.3.10' 'hyprland-protocols>=0.8.0' 'gtest')
+source=('HyprlandX::git+https://github.com/ekremx25/HyprlandX.git#tag=v0.57.0-hdrfix2-1')
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$srcdir/HyprlandX"
+  git submodule update --init --recursive
+}
+
+build() {
+  cmake -S "$srcdir/HyprlandX" -B "$srcdir/build" -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_SKIP_RPATH=ON -DWITH_TESTS=ON
+  cmake --build "$srcdir/build" --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-8}"
+}
+
+check() {
+  "$srcdir/build/hyprland_gtests"
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install "$srcdir/build"
+  install -Dm644 "$srcdir/HyprlandX/LICENSE" "$pkgdir/usr/share/licenses/hyprland/LICENSE"
+}

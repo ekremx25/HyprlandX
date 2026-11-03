@@ -41,7 +41,7 @@ cd HyprlandX/packaging/arch
 makepkg
 ```
 
-The recipe fetches the immutable `v0.57.0-hdrfix2` tag. It is an Arch/CachyOS
+The recipe fetches the immutable `v0.57.0-hdrfix2-1` tag. It is an Arch/CachyOS
 package recipe; library SONAME constraints intentionally target this rebuild.
 The original binary was built with the new dependency packages staged separately,
 without replacing live system libraries during compilation. Rebuilding against
