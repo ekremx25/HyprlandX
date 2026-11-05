@@ -33,32 +33,61 @@ easy IPC, much more QoL stuff than other compositors and more...
 
 </div>
 
-# HyprlandX HDR changes
+# HyprlandX HDR fix 4
 
-This fork includes HDR video fixes and Chromium/Edge SDR reference-white feedback.
-See [HDR changes and validation](docs/HDR-FORK.md) for details.
+Fixes washed-out browser video on HDR displays through Hyprland's color pipeline,
+including BT.1886 gamma, SDR brightness mapping, reference-white feedback and capture.
+Firefox and Edge profiles are not modified.
 
-## Standalone HDR installer (Arch / CachyOS)
+## Download
 
-The [self-contained installer](hdr-installer/install.sh) builds upstream Hyprland
-0.57.1 with the HDR video, BT.1886 and SDR mapping fixes. It requires an installed
-Hyprland 0.57.1 package on x86_64 and creates **no backups**.
+- [Standalone install.sh](https://github.com/ekremx25/HyprlandX/releases/download/v0.57.0-hdrfix2-1/install.sh)
+- [Installer bundle with patches and build recipe](https://github.com/ekremx25/HyprlandX/releases/download/v0.57.0-hdrfix2-1/Hyprland-HDR-Installer.tar.gz)
 
-Download and run as your normal user:
+**These installer assets target Hyprland 0.57.1, even though the hosting release has
+the historical tag `v0.57.0-hdrfix2-1`.** The old binary, standalone patch and
+SHA256SUMS have been removed. GitHub's automatic Source code archives reflect the
+old tag; use the installer downloads above for HDR fix 4.
+
+## Requirements
+
+Arch Linux or CachyOS, x86_64, and an installed `hyprland` 0.57.1 package.
+Internet access and sufficient disk space/RAM for compiling Hyprland are required.
+Install `base-devel` and `git` first if missing; makepkg prompts for other dependencies.
+HDR must already be enabled in your monitor configuration.
+
+## Install
+
+Run as your normal user, without prefixing the script with sudo:
 
 ```sh
-curl -fL https://raw.githubusercontent.com/ekremx25/HyprlandX/main/hdr-installer/install.sh -o hyprland-hdr-install.sh
-bash hyprland-hdr-install.sh --check
-bash hyprland-hdr-install.sh
+curl -fL https://github.com/ekremx25/HyprlandX/releases/download/v0.57.0-hdrfix2-1/install.sh -o install.sh
+bash install.sh --check
+bash install.sh
 ```
 
-The installer checks the version, builds a package, and installs through pacman.
-Existing HDR fix 4 installations are left unchanged. Log out and back in after
-installation. Browser profiles and monitor settings are not modified.
+The script verifies the installed version, applies the bundled patches to pinned
+upstream 0.57.1 source, builds a package and installs it through pacman.
+**No backups are created.** Unsupported versions are rejected; existing HDR fix 4
+installations are left unchanged. Log out and back in after installation.
 
-See [requirements and limitations](hdr-installer/README.txt) and
-[validation notes](hdr-installer/VALIDATION.txt). Future Hyprland updates can
-replace the fix; unsupported versions require a separately validated port.
+Optional: `bash install.sh --build-only` builds without installing.
+`HDR_JOBS=4 bash install.sh` changes the compilation job count (default: 2).
+
+Monitor settings, browser profiles, logins and history are not changed.
+Future Hyprland updates may replace the fix; updates are not blocked.
+Other Hyprland versions need a separately validated port.
+
+## Source and validation
+
+The [readable build recipe and patches](hdr-installer/) are included alongside the
+self-contained script. See [requirements and behavior](hdr-installer/README.txt),
+[installer validation](hdr-installer/VALIDATION.txt), and
+[HDR implementation details](docs/HDR-FORK.md).
+
+All three patches apply to upstream 0.57.1 and the resulting color-rendering files
+match the locally working HDR fix 4 source. That source passed 875 unit tests and
+6 GPU tests. The installer was checked without a new full compilation or reinstall.
 
 # Features
 
