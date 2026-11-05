@@ -38,6 +38,28 @@ easy IPC, much more QoL stuff than other compositors and more...
 This fork includes HDR video fixes and Chromium/Edge SDR reference-white feedback.
 See [HDR changes and validation](docs/HDR-FORK.md) for details.
 
+## Standalone HDR installer (Arch / CachyOS)
+
+The [self-contained installer](hdr-installer/install.sh) builds upstream Hyprland
+0.57.1 with the HDR video, BT.1886 and SDR mapping fixes. It requires an installed
+Hyprland 0.57.1 package on x86_64 and creates **no backups**.
+
+Download and run as your normal user:
+
+```sh
+curl -fL https://raw.githubusercontent.com/ekremx25/HyprlandX/main/hdr-installer/install.sh -o hyprland-hdr-install.sh
+bash hyprland-hdr-install.sh --check
+bash hyprland-hdr-install.sh
+```
+
+The installer checks the version, builds a package, and installs through pacman.
+Existing HDR fix 4 installations are left unchanged. Log out and back in after
+installation. Browser profiles and monitor settings are not modified.
+
+See [requirements and limitations](hdr-installer/README.txt) and
+[validation notes](hdr-installer/VALIDATION.txt). Future Hyprland updates can
+replace the fix; unsupported versions require a separately validated port.
+
 # Features
 
 - All of the eyecandy: gradient borders, many types of blur, animations, glow, shadows and much more

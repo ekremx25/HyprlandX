@@ -1,0 +1,3 @@
+Installer validation passed: Bash syntax; embedded archive/file equality; unsupported version guard; already-installed no-op; invalid job count guard; failure propagation/cleanup; build-only install isolation; makepkg metadata parsing.
+Three patches applied successfully to pristine upstream v0.57.1. All five color-rendering implementation files match working hdrfix4 source.
+No fresh full compilation or system installation was performed for this packaging task.

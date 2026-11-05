@@ -1,0 +1,1849 @@
+diff --git a/README.md b/README.md
+index 886fc16..02fb138 100644
+--- a/README.md
++++ b/README.md
+@@ -33,6 +33,11 @@ easy IPC, much more QoL stuff than other compositors and more...
+ 
+ </div>
+ 
++# HyprlandX HDR changes
++
++This fork includes HDR video fixes and Chromium/Edge SDR reference-white feedback.
++See [HDR changes and validation](docs/HDR-FORK.md) for details.
++
+ # Features
+ 
+ - All of the eyecandy: gradient borders, many types of blur, animations, glow, shadows and much more
+diff --git a/docs/HDR-FORK.md b/docs/HDR-FORK.md
+new file mode 100644
+index 0000000..6d26172
+--- /dev/null
++++ b/docs/HDR-FORK.md
+@@ -0,0 +1,82 @@
++# HDR changes in this fork
++
++This fork carries external YUV texture sampling through the color-management
++shader, PQ content-peak tone mapping, an opt-in per-window `saturation` rule,
++and SDR reference-white feedback for HDR clients such as Chromium and Edge.
++
++## SDR reference white
++
++A color-managed browser can submit ordinary SDR pages in a BT.2020/PQ surface.
++That surface does not go through the compositor's SDR-to-HDR brightness adjustment.
++Previously, the Wayland color-management protocol reported a fixed 203 nit
++reference white even when the configured SDR white was different.
++
++For PQ outputs with a linear FP16 working buffer, the output description and
++preferred surface description now report:
++
++```
++SDR reference white = sdr_max_luminance * sdrbrightness
++```
++
++For example, 251 nit with a brightness multiplier of 1.2 is advertised as 301 nit
++(the protocol uses whole nits). The result is bounded by the target peak. Changes
++to these monitor settings notify connected clients.
++
++The adjustment only changes client-facing reference-white metadata. The scanout
++and working-buffer descriptions, HDR transfer function, mastering primaries and
++peak luminance remain unchanged. SDR/ICC outputs, HLG, and the legacy non-linear
++working-buffer path retain their existing behavior. No new option is required.
++SDR saturation is a separate appearance adjustment and is not represented by
++reference-white metadata.
++
++## SDR screenshots and PipeWire capture
++
++PQ surfaces now use their own reference white when producing the SDR mirror
++copy. Previously this path divided by a fixed 80 nit white, washing out PQ
++browser content at 203 or 301 nits. The mirror is generated before display tone
++mapping; scanout retains its existing tone mapping and HDR luminance.
++
++This corrects SDR desktop content carried inside PQ surfaces. It does not add
++highlight compression for genuine HDR content above reference white, or change
++the capture protocol to deliver HDR metadata. Selecting Rec.2100 PQ in OBS does
++not by itself make its PipeWire source a native HDR source.
++
++GPU regression tests exercise the production shader with 80, 203, and 301 nit
++reference whites, colored pixels, premultiplied alpha, unchanged SDR capture,
++and unchanged HDR display output. All 676 tests passed. A real Edge PQ surface
++captured with grim reproduced the issue before the fix: #808080 became
++#e9e9e9. With the fix it captured as #808080; primary color samples were within
++one 8-bit code value of the original page.
++
++## Validation and versions
++
++The fix was first validated on a patched v0.56.2 desktop: the user confirmed that
++Edge's washed-out appearance was resolved after restarting the compositor.
++A separate virtual HDR output verified reference-white updates, and a real Edge
++client continued to submit PQ surfaces using the updated reference white.
++
++This branch ports that fix onto this fork's newer `main` renderer. It also
++includes unit tests for metadata preservation, reference changes, target-peak
++clamping, invalid inputs, and unchanged SDR/HLG/ICC descriptions.
++
++The main-based port passed all 673 unit tests. A separate running compositor
++verified 301 -> 251 -> 301 nit protocol updates while keeping the HDR peak at
++486 nit. An actual Edge client received 301 nit white and continued submitting
++PQ surfaces with matching reference-white and content-peak metadata.
++
++Build with the dependencies documented by Hyprland:
++
++```sh
++git submodule update --init --recursive
++bash scripts/generateShaderIncludes.sh
++cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWITH_TESTS=ON
++cmake --build build --target Hyprland hyprland_gtests --parallel
++./build/hyprland_gtests
++```
++
++The running v0.56.2 package and this main-based source tree are different builds.
++Before installing a main-based build, validate your configuration with
++`./build/Hyprland --verify-config --config /path/to/hyprland.lua`. In particular,
++this newer base limits `decoration.shadow.render_power` to 4 and
++`decoration.blur.vibrancy` to 1.0. Configuration reload does not replace the running
++compositor binary; installing a new build requires a new session to activate it.
+diff --git a/src/Compositor.cpp b/src/Compositor.cpp
+index 25f0e63..0f424b2 100644
+--- a/src/Compositor.cpp
++++ b/src/Compositor.cpp
+@@ -1,6 +1,7 @@
+ 
+ #include "Compositor.hpp"
+ #include "helpers/MiscFunctions.hpp"
++#include "helpers/cm/ClientImageDescription.hpp"
+ #include "render/decorations/DecorationPositioner.hpp"
+ #include "config/supplementary/executor/Executor.hpp"
+ #include "debug/log/Logger.hpp"
+@@ -986,7 +987,7 @@ PImageDescription CCompositor::getPreferredImageDescription() {
+     }
+     LOG(Log::WARN, "FIXME: color management protocol is enabled, determine correct preferred image description");
+     // should determine some common settings to avoid unnecessary transformations while keeping maximum displayable precision
+-    return State::monitorState()->monitors().size() == 1 ? State::monitorState()->monitors()[0]->m_imageDescription :
++    return State::monitorState()->monitors().size() == 1 ? clientImageDescription(State::monitorState()->monitors()[0]) :
+                                                            CImageDescription::from(SImageDescription{.primaries = NColorPrimaries::BT709});
+ }
+ 
+diff --git a/src/config/lua/bindings/LuaBindingsInternal.hpp b/src/config/lua/bindings/LuaBindingsInternal.hpp
+index 86750d4..2cb0f0a 100644
+--- a/src/config/lua/bindings/LuaBindingsInternal.hpp
++++ b/src/config/lua/bindings/LuaBindingsInternal.hpp
+@@ -106,6 +106,7 @@ namespace Config::Lua::Bindings::Internal {
+         {"stay_focused", []() -> ILuaConfigValue* { return new CLuaConfigBool(false); }, WE::WINDOW_RULE_EFFECT_STAY_FOCUSED},
+         {"confine_pointer", []() -> ILuaConfigValue* { return new CLuaConfigBool(false); }, WE::WINDOW_RULE_EFFECT_CONFINE_POINTER},
+         {"no_xdg_drags", []() -> ILuaConfigValue* { return new CLuaConfigBool(false); }, WE::WINDOW_RULE_EFFECT_NO_XDG_DRAGS},
++        {"saturation", []() -> ILuaConfigValue* { return new CLuaConfigString(STRVAL_EMPTY); }, WE::WINDOW_RULE_EFFECT_SATURATION},
+         {"tonemap", []() -> ILuaConfigValue* { return new CLuaConfigString(STRVAL_EMPTY); }, WE::WINDOW_RULE_EFFECT_TONEMAP},
+     };
+ 
+diff --git a/src/desktop/rule/windowRule/WindowRule.cpp b/src/desktop/rule/windowRule/WindowRule.cpp
+index 805d407..2618bcc 100644
+--- a/src/desktop/rule/windowRule/WindowRule.cpp
++++ b/src/desktop/rule/windowRule/WindowRule.cpp
+@@ -16,6 +16,7 @@
+ #include <hyprutils/string/VarList.hpp>
+ #include <hyprutils/string/VarList2.hpp>
+ #include <algorithm>
++#include <cmath>
+ #include <format>
+ #include <numbers>
+ 
+@@ -289,6 +290,14 @@ static std::expected<WindowRuleEffectValue, std::string> parseWindowRuleEffect(C
+         case WINDOW_RULE_EFFECT_SUPPRESSEVENT: return parseStringList(raw);
+ 
+         case WINDOW_RULE_EFFECT_CONTENT: return sc<int64_t>(NContentType::fromString(raw));
++        case WINDOW_RULE_EFFECT_SATURATION: {
++            auto parsed = parseFloat(EFFECT_NAME, raw);
++            if (!parsed)
++                return std::unexpected(parsed.error());
++            if (!std::isfinite(*parsed) || *parsed < 0.F || *parsed > 2.F)
++                return std::unexpected(std::format("{} rule must be finite and between 0 and 2", EFFECT_NAME));
++            return *parsed;
++        }
+         case WINDOW_RULE_EFFECT_TONEMAP: {
+             if (raw == "1" || raw == "on")
+                 return 1;
+diff --git a/src/desktop/rule/windowRule/WindowRuleApplicator.cpp b/src/desktop/rule/windowRule/WindowRuleApplicator.cpp
+index b198ae4..eb1cb21 100644
+--- a/src/desktop/rule/windowRule/WindowRuleApplicator.cpp
++++ b/src/desktop/rule/windowRule/WindowRuleApplicator.cpp
+@@ -38,6 +38,7 @@ CWindowRuleApplicator::CWindowRuleApplicator(PHLWINDOW w) : m_window(w) {
+ 
+ std::unordered_set<CWindowRuleEffectContainer::storageType> CWindowRuleApplicator::resetProps(std::underlying_type_t<eRuleProperty> props, Types::eOverridePriority prio) {
+     std::unordered_set<CWindowRuleEffectContainer::storageType> effectsNuked;
++    resetRuleProp(m_saturation, props, prio, effectsNuked, [this] { return saturationEffect(); });
+ 
+     std::apply([&](auto&&... prop) { (resetRuleProp(prop.first.get(), props, prio, effectsNuked, prop.second), ...); },
+                std::make_tuple(std::pair{std::ref(m_alpha), [this] { return alphaEffect(); }},
+@@ -397,6 +398,11 @@ CWindowRuleApplicator::SRuleResult CWindowRuleApplicator::applyDynamicRule(const
+                 m_noAutoHDR.second |= rule->getPropertiesMask();
+                 break;
+             }
++            case WINDOW_RULE_EFFECT_SATURATION: {
++                m_saturation.first.set(std::get<float>(value), Types::PRIORITY_WINDOW_RULE);
++                m_saturation.second |= rule->getPropertiesMask();
++                break;
++            }
+             case WINDOW_RULE_EFFECT_TONEMAP: {
+                 m_tonemap.first.set(std::get<int64_t>(value), Types::PRIORITY_WINDOW_RULE);
+                 m_noAutoHDR.second |= rule->getPropertiesMask();
+diff --git a/src/desktop/rule/windowRule/WindowRuleApplicator.hpp b/src/desktop/rule/windowRule/WindowRuleApplicator.hpp
+index ed97315..50b8c6c 100644
+--- a/src/desktop/rule/windowRule/WindowRuleApplicator.hpp
++++ b/src/desktop/rule/windowRule/WindowRuleApplicator.hpp
+@@ -127,6 +127,7 @@ namespace Desktop::Rule {
+         DEFINE_PROP(Config::INTEGER, borderSize, {std::string("general:border_size") COMMA sc<Config::INTEGER>(0) COMMA std::nullopt}, WINDOW_RULE_EFFECT_BORDER_SIZE)
+         DEFINE_PROP(Config::INTEGER, rounding, {std::string("decoration:rounding") COMMA sc<Config::INTEGER>(0) COMMA std::nullopt}, WINDOW_RULE_EFFECT_ROUNDING)
+         DEFINE_PROP(Config::INTEGER, tonemap, 1, WINDOW_RULE_EFFECT_TONEMAP)
++        DEFINE_PROP(Config::FLOAT, saturation, 1.F, WINDOW_RULE_EFFECT_SATURATION)
+ 
+         DEFINE_PROP(Config::FLOAT, roundingPower, {std::string("decoration:rounding_power")}, WINDOW_RULE_EFFECT_ROUNDING_POWER)
+         DEFINE_PROP(Config::FLOAT, scrollMouse, {std::string("input:scroll_factor")}, WINDOW_RULE_EFFECT_SCROLL_MOUSE)
+diff --git a/src/desktop/rule/windowRule/WindowRuleEffectContainer.cpp b/src/desktop/rule/windowRule/WindowRuleEffectContainer.cpp
+index 366a8c9..ca80e1e 100644
+--- a/src/desktop/rule/windowRule/WindowRuleEffectContainer.cpp
++++ b/src/desktop/rule/windowRule/WindowRuleEffectContainer.cpp
+@@ -71,12 +71,13 @@ static const std::vector<std::string> EFFECT_STRINGS = {
+     "stay_focused",           //
+     "confine_pointer",        //
+     "no_xdg_drags",           //
++    "saturation",             //
+     "__internal_last_static", //
+ };
+ 
+ // This is here so that if we change the rules, we get reminded to update
+ // the strings.
+-static_assert(WINDOW_RULE_EFFECT_LAST_STATIC == 61);
++static_assert(WINDOW_RULE_EFFECT_LAST_STATIC == 62);
+ 
+ CWindowRuleEffectContainer::CWindowRuleEffectContainer() : IEffectContainer<eWindowRuleEffect>(std::vector<std::string>{EFFECT_STRINGS}) {
+     ;
+diff --git a/src/desktop/rule/windowRule/WindowRuleEffectContainer.hpp b/src/desktop/rule/windowRule/WindowRuleEffectContainer.hpp
+index 8c7831d..0c4dd09 100644
+--- a/src/desktop/rule/windowRule/WindowRuleEffectContainer.hpp
++++ b/src/desktop/rule/windowRule/WindowRuleEffectContainer.hpp
+@@ -73,6 +73,7 @@ namespace Desktop::Rule {
+         WINDOW_RULE_EFFECT_CONFINE_POINTER,
+         WINDOW_RULE_EFFECT_NO_XDG_DRAGS,
+ 
++        WINDOW_RULE_EFFECT_SATURATION,
+         WINDOW_RULE_EFFECT_LAST_STATIC,
+     };
+ 
+diff --git a/src/helpers/Format.cpp b/src/helpers/Format.cpp
+index 8830a52..e041131 100644
+--- a/src/helpers/Format.cpp
++++ b/src/helpers/Format.cpp
+@@ -1,5 +1,6 @@
+ #include "Format.hpp"
+ #include <vector>
++#include <algorithm>
+ #include "../includes.hpp"
+ #include "debug/log/Logger.hpp"
+ #include "../macros.hpp"
+@@ -176,3 +177,34 @@ DRMFormat NFormatUtils::alphaFormat(DRMFormat prevFormat) {
+         default: return 0;
+     }
+ }
++
++std::optional<std::vector<uint64_t>> NFormatUtils::getTexture2DModifiers(std::span<const uint64_t> modifiers, std::span<const EGLBoolean> externalOnly) {
++    if (modifiers.empty())
++        return std::vector<uint64_t>{};
++
++    std::vector<uint64_t> result;
++    // reserve number of elements to avoid reallocations
++    result.reserve(modifiers.size());
++
++    bool linearIsExternal = false;
++    for (size_t i = 0; i < std::min(modifiers.size(), externalOnly.size()); ++i) {
++        if (externalOnly[i]) {
++            if (modifiers[i] == DRM_FORMAT_MOD_LINEAR)
++                linearIsExternal = true;
++            continue;
++        }
++
++        result.push_back(modifiers[i]);
++    }
++
++    // An external-only format cannot be sampled by our GL_TEXTURE_2D renderer,
++    // even if importing it without an explicit modifier succeeds.
++    if (result.empty())
++        return std::nullopt;
++
++    // if the driver doesn't mark linear as external, add it. It's allowed unless the driver says otherwise. (e.g. nvidia)
++    if (!linearIsExternal && std::ranges::find(modifiers, DRM_FORMAT_MOD_LINEAR) == modifiers.end())
++        result.push_back(DRM_FORMAT_MOD_LINEAR);
++
++    return result;
++}
+diff --git a/src/helpers/Format.hpp b/src/helpers/Format.hpp
+index 3e2f9d8..4712401 100644
+--- a/src/helpers/Format.hpp
++++ b/src/helpers/Format.hpp
+@@ -3,6 +3,10 @@
+ #include <cstddef>
+ #include <cstdint>
+ #include <string>
++#include <optional>
++#include <span>
++#include <vector>
++#include <EGL/egl.h>
+ #include <GLES3/gl32.h>
+ #include "math/Math.hpp"
+ #include <aquamarine/backend/Misc.hpp>
+@@ -13,11 +17,12 @@ using SHMFormat = uint32_t;
+ using SDRMFormat = Aquamarine::SDRMFormat;
+ 
+ namespace NFormatUtils {
+-    SHMFormat   drmToShm(DRMFormat drm);
+-    DRMFormat   shmToDRM(SHMFormat shm);
+-    bool        isFormatYUV(uint32_t drmFormat);
+-    bool        isShmBufferLayoutValid(DRMFormat drmFormat, const Vector2D& size, int32_t stride, int32_t offset, size_t poolSize);
+-    std::string drmFormatName(DRMFormat drm);
+-    std::string drmModifierName(uint64_t mod);
+-    DRMFormat   alphaFormat(DRMFormat prevFormat);
++    SHMFormat                            drmToShm(DRMFormat drm);
++    DRMFormat                            shmToDRM(SHMFormat shm);
++    bool                                 isFormatYUV(uint32_t drmFormat);
++    std::optional<std::vector<uint64_t>> getTexture2DModifiers(std::span<const uint64_t> modifiers, std::span<const EGLBoolean> externalOnly);
++    bool                                 isShmBufferLayoutValid(DRMFormat drmFormat, const Vector2D& size, int32_t stride, int32_t offset, size_t poolSize);
++    std::string                          drmFormatName(DRMFormat drm);
++    std::string                          drmModifierName(uint64_t mod);
++    DRMFormat                            alphaFormat(DRMFormat prevFormat);
+ };
+diff --git a/src/helpers/cm/ClientImageDescription.cpp b/src/helpers/cm/ClientImageDescription.cpp
+new file mode 100644
+index 0000000..24350fc
+--- /dev/null
++++ b/src/helpers/cm/ClientImageDescription.cpp
+@@ -0,0 +1,40 @@
++#include "ClientImageDescription.hpp"
++#include "../../output/Monitor.hpp"
++
++#include <algorithm>
++#include <cmath>
++
++using namespace NColorManagement;
++
++PImageDescription NColorManagement::withSDRReferenceWhite(PImageDescription output, double whiteLuminance) {
++    const auto& desc = output->value();
++    if (desc.icc.present || desc.transferFunction != CM_TRANSFER_FUNCTION_ST2084_PQ || !std::isfinite(whiteLuminance) || whiteLuminance <= 0)
++        return output;
++
++    auto luminances = desc.luminances;
++    // Reference white must fit in the target volume. Keep all HDR encoding and
++    // mastering metadata intact; only describe where the compositor puts SDR white.
++    const double peak    = desc.masteringLuminances.max > 0 ? desc.masteringLuminances.max : luminances.max;
++    const double minimum = std::max(1.0, std::floor(luminances.min) + 1.0);
++    if (peak < minimum)
++        return output;
++
++    luminances.reference = sc<uint32_t>(std::round(std::clamp(whiteLuminance, minimum, peak)));
++    return output->with(luminances);
++}
++
++PImageDescription NColorManagement::clientImageDescription(PHLMONITORREF monitor) {
++    const auto output = monitor->m_imageDescription;
++    if (output->value().transferFunction != CM_TRANSFER_FUNCTION_ST2084_PQ || output->value().icc.present)
++        return output;
++
++    // SDR brightness is a linear luminance gain in the FP16 HDR work buffer.
++    // The legacy non-FP16 path applies it in encoded space and is intentionally
++    // left alone rather than reporting an incorrect linear gain for that path.
++    const auto workTF = monitor->workBufferImageDescription()->value().transferFunction;
++    if (workTF != CM_TRANSFER_FUNCTION_LINEAR && workTF != CM_TRANSFER_FUNCTION_EXT_LINEAR)
++        return output;
++
++    const double brightness = monitor->m_sdrBrightness > 0 ? monitor->m_sdrBrightness : 1.0;
++    return withSDRReferenceWhite(output, monitor->m_sdrMaxLuminance * brightness);
++}
+diff --git a/src/helpers/cm/ClientImageDescription.hpp b/src/helpers/cm/ClientImageDescription.hpp
+new file mode 100644
+index 0000000..3bf4bfa
+--- /dev/null
++++ b/src/helpers/cm/ClientImageDescription.hpp
+@@ -0,0 +1,10 @@
++#pragma once
++
++#include "ColorManagement.hpp"
++#include "../../desktop/DesktopTypes.hpp"
++
++namespace NColorManagement {
++    // Client-facing metadata only: do not use as the scanout or work-buffer description.
++    PImageDescription withSDRReferenceWhite(PImageDescription output, double whiteLuminance);
++    PImageDescription clientImageDescription(PHLMONITORREF monitor);
++}
+diff --git a/src/output/Monitor.cpp b/src/output/Monitor.cpp
+index 7775fca..d3ec61c 100644
+--- a/src/output/Monitor.cpp
++++ b/src/output/Monitor.cpp
+@@ -39,6 +39,7 @@
+ #include "../layout/algorithm/Algorithm.hpp"
+ #include "../i18n/Engine.hpp"
+ #include "../helpers/cm/ColorManagement.hpp"
++#include "../helpers/cm/ClientImageDescription.hpp"
+ #include "../state/MonitorState.hpp"
+ #include "../state/MonitorLayoutController.hpp"
+ #include "../state/WorkspacePlacementController.hpp"
+@@ -594,6 +595,7 @@ void CMonitor::applyCMType(NCMType::eCMType cmType, NTransferFunction::eTF cmSdr
+ }
+ 
+ bool CMonitor::applyMonitorRuleSoft(Config::CMonitorRule&& pMonitorRule) {
++    const auto oldClientDescription = clientImageDescription(m_self);
+     m_activeMonitorRule = std::move(pMonitorRule);
+     m_reservedArea.setStatic(m_activeMonitorRule.m_reservedArea);
+     m_transform         = m_activeMonitorRule.m_transform;
+@@ -621,10 +623,10 @@ bool CMonitor::applyMonitorRuleSoft(Config::CMonitorRule&& pMonitorRule) {
+         m_maxLuminance    = m_activeMonitorRule.m_maxLuminance;
+         m_maxAvgLuminance = m_activeMonitorRule.m_maxAvgLuminance;
+ 
+-        applyCMType(m_cmType, m_sdrEotf);
+-
+         m_sdrSaturation = m_activeMonitorRule.m_sdrSaturation;
+         m_sdrBrightness = m_activeMonitorRule.m_sdrBrightness;
++
++        applyCMType(m_cmType, m_sdrEotf);
+     } else {
+         auto image = NColorManagement::SImageDescription::fromICC(m_activeMonitorRule.m_iccFile);
+         if (!image) {
+@@ -640,6 +642,9 @@ bool CMonitor::applyMonitorRuleSoft(Config::CMonitorRule&& pMonitorRule) {
+         }
+     }
+ 
++    if (PROTO::colorManagement && oldClientDescription != clientImageDescription(m_self))
++        PROTO::colorManagement->onMonitorImageDescriptionChanged(m_self);
++
+     Vector2D xfmd     = m_transform % 2 == 1 ? Vector2D{m_pixelSize.y, m_pixelSize.x} : m_pixelSize;
+     m_size            = (xfmd / m_scale).round();
+     m_transformedSize = xfmd;
+@@ -1962,6 +1967,12 @@ uint16_t CMonitor::isDSBlocked(bool full) {
+             return reasons;
+     }
+ 
++    if (PCANDIDATE->m_ruleApplicator->saturation().valueOrDefault() != 1.F) {
++        reasons |= DS_BLOCK_CM;
++        if (!full)
++            return reasons;
++    }
++
+     const auto PSURFACE = PCANDIDATE->getSolitaryResource();
+     if (!PSURFACE || !PSURFACE->m_current.texture || !PSURFACE->m_current.buffer) {
+         reasons |= DS_BLOCK_SURFACE;
+diff --git a/src/protocols/ColorManagement.cpp b/src/protocols/ColorManagement.cpp
+index 3d11d2b..1c89a9d 100644
+--- a/src/protocols/ColorManagement.cpp
++++ b/src/protocols/ColorManagement.cpp
+@@ -4,6 +4,7 @@
+ #include "../output/Monitor.hpp"
+ #include "core/Output.hpp"
+ #include "../helpers/cm/ColorManagement.hpp"
++#include "../helpers/cm/ClientImageDescription.hpp"
+ #include <cstdint>
+ 
+ using namespace NColorManagement;
+@@ -269,7 +270,7 @@ CColorManagementOutput::CColorManagementOutput(SP<CWpColorManagementOutputV1> re
+         if (!m_output || !m_output->m_monitor.valid())
+             RESOURCE->m_resource->sendFailed(WP_IMAGE_DESCRIPTION_V1_CAUSE_NO_OUTPUT, "No output");
+         else {
+-            RESOURCE->m_settings = m_output->m_monitor->m_imageDescription;
++            RESOURCE->m_settings = clientImageDescription(m_output->m_monitor);
+ 
+             RESOURCE->sendMaybeReady();
+         }
+diff --git a/src/protocols/LinuxDMABUF.cpp b/src/protocols/LinuxDMABUF.cpp
+index 35bbb4a..a92fb81 100644
+--- a/src/protocols/LinuxDMABUF.cpp
++++ b/src/protocols/LinuxDMABUF.cpp
+@@ -82,6 +82,11 @@ CDMABUFFormatTable::CDMABUFFormatTable(SDMABUFTranche _rendererTranche, std::vec
+                 // apparently these can implode on planes, so don't use them
+                 if (mod == DRM_FORMAT_MOD_INVALID || mod == DRM_FORMAT_MOD_LINEAR)
+                     continue;
++                // Scanout may end at any frame; the same buffer must also be compositable.
++                if (std::ranges::none_of(m_rendererTranche.formats, [&](const SDRMFormat& renderFormat) {
++                        return renderFormat.drmFormat == fmt.drmFormat && std::ranges::find(renderFormat.modifiers, mod) != renderFormat.modifiers.end();
++                    }))
++                    continue;
+                 auto [_, inserted] = formats.emplace(fmt.drmFormat, mod);
+                 if (inserted) {
+                     tranche.indices.push_back(i++);
+diff --git a/src/protocols/core/Compositor.cpp b/src/protocols/core/Compositor.cpp
+index d7e75f6..811b069 100644
+--- a/src/protocols/core/Compositor.cpp
++++ b/src/protocols/core/Compositor.cpp
+@@ -9,6 +9,7 @@
+ #include "Subcompositor.hpp"
+ #include "../Viewporter.hpp"
+ #include "../../output/Monitor.hpp"
++#include "../../helpers/cm/ClientImageDescription.hpp"
+ #include "../PresentationTime.hpp"
+ #include "../DRMSyncobj.hpp"
+ #include "../types/DMABuffer.hpp"
+@@ -729,7 +730,7 @@ PImageDescription CWLSurfaceResource::getPreferredImageDescription() {
+         return g_pCompositor->getPreferredImageDescription();
+ 
+     // auto HDR only switches once a fullscreen client submits HDR content, so offer it the description it would switch to
+-    return monitor->getAutoHDRImageDescription(parent.lock()).value_or(monitor->m_imageDescription);
++    return monitor->getAutoHDRImageDescription(parent.lock()).value_or(clientImageDescription(monitor));
+ }
+ 
+ void CWLSurfaceResource::sortSubsurfaces() {
+diff --git a/src/render/ElementRenderer.cpp b/src/render/ElementRenderer.cpp
+index e6ffe0f..e4a38aa 100644
+--- a/src/render/ElementRenderer.cpp
++++ b/src/render/ElementRenderer.cpp
+@@ -355,6 +355,7 @@ void IElementRenderer::drawSurface(CRenderContext& ctx, WP<CSurfacePassElement>
+                             .discardOpacity        = m_data.discardOpacity,
+                             .clipRegion            = clipRegion,
+                             .currentLS             = m_data.pLS,
++                            .saturation            = m_data.pWindow ? m_data.pWindow->m_ruleApplicator->saturation().valueOrDefault() : 1.F,
+                             .blurOwner             = m_data.pWindow,
+                             .workspacePresentation = m_data.workspacePresentation,
+                         }),
+@@ -377,6 +378,7 @@ void IElementRenderer::drawSurface(CRenderContext& ctx, WP<CSurfacePassElement>
+                             .discardOpacity        = m_data.discardOpacity,
+                             .clipRegion            = clipRegion,
+                             .currentLS             = m_data.pLS,
++                            .saturation            = m_data.pWindow ? m_data.pWindow->m_ruleApplicator->saturation().valueOrDefault() : 1.F,
+                             .workspacePresentation = m_data.workspacePresentation,
+                         }),
+                         surfaceDamage());
+@@ -401,6 +403,7 @@ void IElementRenderer::drawSurface(CRenderContext& ctx, WP<CSurfacePassElement>
+                             .discardOpacity        = m_data.discardOpacity,
+                             .clipRegion            = clipRegion,
+                             .currentLS             = m_data.pLS,
++                            .saturation            = m_data.pWindow ? m_data.pWindow->m_ruleApplicator->saturation().valueOrDefault() : 1.F,
+                             .workspacePresentation = m_data.workspacePresentation,
+                         }),
+                         surfaceDamage());
+@@ -421,6 +424,7 @@ void IElementRenderer::drawSurface(CRenderContext& ctx, WP<CSurfacePassElement>
+                             .discardOpacity        = m_data.discardOpacity,
+                             .clipRegion            = clipRegion,
+                             .currentLS             = m_data.pLS,
++                            .saturation            = m_data.pWindow ? m_data.pWindow->m_ruleApplicator->saturation().valueOrDefault() : 1.F,
+                             .workspacePresentation = m_data.workspacePresentation,
+                         }),
+                         surfaceDamage());
+diff --git a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
+index cb2801c..591794a 100644
+--- a/src/render/OpenGL.cpp
++++ b/src/render/OpenGL.cpp
+@@ -369,6 +369,7 @@ CHyprOpenGLImpl::CHyprOpenGLImpl() : m_drmFD(g_pCompositor->m_drmRenderNode.fd >
+     RASSERT(EXTENSIONS, "Couldn't retrieve openGL extensions!");
+ 
+     m_extensions = EXTENSIONS;
++    m_exts.OES_EGL_image_external_essl3 = m_extensions.contains("GL_OES_EGL_image_external_essl3");
+ 
+     LOG(Log::DEBUG, "Creating the Hypr OpenGL Renderer!");
+     LOG(Log::DEBUG, "Using: {}", rc<const char*>(glGetString(GL_VERSION)));
+@@ -499,26 +500,7 @@ std::optional<std::vector<uint64_t>> CHyprOpenGLImpl::getModsForFormat(EGLint fo
+         return std::nullopt;
+     }
+ 
+-    std::vector<uint64_t> result;
+-    // reserve number of elements to avoid reallocations
+-    result.reserve(mods.size());
+-
+-    bool linearIsExternal = false;
+-    for (size_t i = 0; i < std::min(mods.size(), external.size()); ++i) {
+-        if (external[i]) {
+-            if (mods[i] == DRM_FORMAT_MOD_LINEAR)
+-                linearIsExternal = true;
+-            continue;
+-        }
+-
+-        result.push_back(mods[i]);
+-    }
+-
+-    // if the driver doesn't mark linear as external, add it. It's allowed unless the driver says otherwise. (e.g. nvidia)
+-    if (!linearIsExternal && std::ranges::find(mods, DRM_FORMAT_MOD_LINEAR) == mods.end())
+-        result.push_back(DRM_FORMAT_MOD_LINEAR);
+-
+-    return result;
++    return NFormatUtils::getTexture2DModifiers(mods, external);
+ }
+ 
+ void CHyprOpenGLImpl::initDRMFormats() {
+@@ -946,7 +928,7 @@ void CHyprOpenGLImpl::end(CRenderContext& ctx) {
+ 
+ static const std::vector<std::string> SHADER_INCLUDES = {
+     "defines.h",       "constants.h",      "cm_helpers.glsl", "rounding.glsl", "CM.glsl",         "tonemap.glsl",     "gain.glsl",     "border.glsl",      "shadow.glsl",
+-    "inner_glow.glsl", "blurprepare.glsl", "blur1.glsl",      "blur2.glsl",    "blurFinish.glsl", "motion_blur.glsl", "gradient.glsl", "glassFinish.glsl", "fluidJar.glsl",
++    "inner_glow.glsl", "blurprepare.glsl", "blur1.glsl",      "blur2.glsl",    "blurFinish.glsl", "motion_blur.glsl", "motion_blur_sample.glsl", "gradient.glsl", "glassFinish.glsl", "fluidJar.glsl",
+ };
+ 
+ // order matters, see ePreparedFragmentShader
+@@ -1436,8 +1418,11 @@ WP<CShader> CHyprOpenGLImpl::renderToFBInternal(CRenderContext& ctx, SP<ITexture
+         case TEXTURE_RGBA: shaderFeatures |= SH_FEAT_RGBA; break;
+         case TEXTURE_RGBX: shaderFeatures &= ~SH_FEAT_RGBA; break;
+ 
+-        // TODO set correct features
+-        case TEXTURE_EXTERNAL: shader = getShaderVariant(SH_FRAG_EXT, SH_FEAT_ROUNDING | SH_FEAT_DISCARD | SH_FEAT_TINT | globalFeatures(ctx)); break; // might be unused
++        case TEXTURE_EXTERNAL:
++            shaderFeatures |= SH_FEAT_EXTERNAL;
++            if (!tex->m_opaque)
++                shaderFeatures |= SH_FEAT_RGBA;
++            break;
+         default: RASSERT(false, "tex->m_iTarget unsupported!");
+     }
+ 
+@@ -1516,6 +1501,9 @@ WP<CShader> CHyprOpenGLImpl::renderToFBInternal(CRenderContext& ctx, SP<ITexture
+         (ctx.m_data.currentWindow->presentation().notRespondingTint() > 0 || ctx.m_data.currentWindow->presentation().dimPercent() > 0))
+         shaderFeatures |= SH_FEAT_TINT;
+ 
++    if (data.saturation != 1.F && !data.finalMonitorCM && !data.cmBackToSRGB)
++        shaderFeatures |= SH_FEAT_SATURATION;
++
+     if (data.round > 0)
+         shaderFeatures |= SH_FEAT_ROUNDING;
+ 
+@@ -1616,6 +1604,13 @@ WP<CShader> CHyprOpenGLImpl::renderToFBInternal(CRenderContext& ctx, SP<ITexture
+     } else
+         shader->setUniformInt(SHADER_APPLY_TINT, 0);
+ 
++    if (shaderFeatures & SH_FEAT_SATURATION) {
++        auto        xyzMatrix = SOURCE_IMAGE_DESCRIPTION->getPrimaries()->toXYZ();
++        const auto& xyz       = xyzMatrix.mat();
++        const float sum       = xyz[1][0] + xyz[1][1] + xyz[1][2];
++        shader->setUniformFloat(SHADER_WINDOW_SATURATION, data.saturation);
++        shader->setUniformFloat3(SHADER_WINDOW_SATURATION_WEIGHTS, xyz[1][0] / sum, xyz[1][1] / sum, xyz[1][2] / sum);
++    }
+     return shader;
+ }
+ 
+@@ -1851,7 +1846,7 @@ void CHyprOpenGLImpl::renderTextureMatte(CRenderContext& ctx, SP<ITexture> tex,
+     // get transform
+     const auto& glMatrix = g_pHyprRenderer->projectBoxToTarget(ctx, newBox);
+ 
+-    auto        shader = useShader(getShaderVariant(SH_FRAG_MATTE, globalFeatures(ctx)));
++    auto        shader = useShader(getShaderVariant(SH_FRAG_MATTE, globalFeatures(ctx) | (tex->m_type == TEXTURE_EXTERNAL ? SH_FEAT_EXTERNAL : 0)));
+     shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, glMatrix.getMatrix());
+     shader->setUniformInt(SHADER_TEX, 0);
+     shader->setUniformInt(SHADER_ALPHA_MATTE, 1);
+@@ -1999,6 +1994,7 @@ void CHyprOpenGLImpl::renderTextureWithBlurInternal(CRenderContext& ctx, SP<ITex
+ 
+                               .primarySurfaceUVTopLeft     = ctx.m_data.primarySurfaceUVTopLeft,
+                               .primarySurfaceUVBottomRight = ctx.m_data.primarySurfaceUVBottomRight,
++                              .saturation                  = data.saturation,
+                           });
+ 
+     GLFB(ctx.m_data.currentFB)->invalidate({GL_DEPTH_STENCIL_ATTACHMENT});
+diff --git a/src/render/OpenGL.hpp b/src/render/OpenGL.hpp
+index ffaa353..0f359ef 100644
+--- a/src/render/OpenGL.hpp
++++ b/src/render/OpenGL.hpp
+@@ -176,6 +176,7 @@ namespace Render::GL {
+             Vector2D               primarySurfaceUVTopLeft     = Vector2D(-1, -1);
+             Vector2D               primarySurfaceUVBottomRight = Vector2D(-1, -1);
+ 
++            float                  saturation = 1.F;
+             SMotionBlurData        motionBlur;
+         };
+ 
+@@ -279,6 +280,7 @@ namespace Render::GL {
+         struct {
+             bool EXT_read_format_bgra               = false;
+             bool EXT_color_buffer_half_float        = false;
++            bool OES_EGL_image_external_essl3        = false;
+             bool EXT_image_dma_buf_import           = false;
+             bool EXT_image_dma_buf_import_modifiers = false;
+             bool KHR_context_flush_control          = false;
+diff --git a/src/render/Renderer.cpp b/src/render/Renderer.cpp
+index 4bbb606..ce84bcb 100644
+--- a/src/render/Renderer.cpp
++++ b/src/render/Renderer.cpp
+@@ -2171,7 +2171,9 @@ SCMSettings IHyprRenderer::getCMSettings(CRenderContext& ctx, const NColorManage
+ 
+     const bool  needsSDRmod     = modifySDR && isSDR2HDR(ctx, imageDescription->value(), targetImageDescription->value());
+     const bool  needsHDRmod     = !needsSDRmod && isHDR2SDR(imageDescription->value(), targetImageDescription->value());
+-    const float maxLuminance    = needsHDRmod ?
++    // MaxCLL is an absolute content peak, unlike the encoding-volume maximum.
++    const bool  hasContentPeak  = srcTF == CM_TRANSFER_FUNCTION_ST2084_PQ && imageDescription->value().maxCLL > 0;
++    const float maxLuminance    = hasContentPeak ? std::min<float>(imageDescription->value().maxCLL, imageDescription->value().getTFMaxLuminance()) : needsHDRmod ?
+         imageDescription->value().getTFMaxLuminance(-1) :
+         (imageDescription->value().luminances.max > 0 ? imageDescription->value().luminances.max : imageDescription->value().luminances.reference);
+     const auto  dstMaxLuminance = targetImageDescription->value().luminances.max > 0 ? targetImageDescription->value().luminances.max : 10000;
+@@ -2199,7 +2201,7 @@ SCMSettings IHyprRenderer::getCMSettings(CRenderContext& ctx, const NColorManage
+         .needsTonemap            = tonemapMode != 0 && needsTonemap,
+         .tonemapMode             = tonemapMode,
+         .maxLuminance            = needsTonemap && tonemapMode == 2 ? dstMaxLuminance :
+-                                                                      maxLuminance * targetImageDescription->value().luminances.reference / imageDescription->value().luminances.reference,
++                                                                      (hasContentPeak ? maxLuminance : maxLuminance * targetImageDescription->value().luminances.reference / imageDescription->value().luminances.reference),
+         .dstMaxLuminance         = dstMaxLuminance,
+         .dstPrimaries2XYZ        = toXYZ.mat(),
+         .needsSDRmod             = needsMod,
+diff --git a/src/render/Shader.cpp b/src/render/Shader.cpp
+index 5a49d13..240fdf8 100644
+--- a/src/render/Shader.cpp
++++ b/src/render/Shader.cpp
+@@ -193,6 +193,8 @@ void CShader::getUniformLocations() {
+     m_uniformLocations[SHADER_SHADOW_POWER]                = getUniform("shadowPower");
+     m_uniformLocations[SHADER_USE_ALPHA_MATTE]             = getUniform("useAlphaMatte");
+     m_uniformLocations[SHADER_APPLY_TINT]                  = getUniform("applyTint");
++    m_uniformLocations[SHADER_WINDOW_SATURATION]           = getUniform("windowSaturation");
++    m_uniformLocations[SHADER_WINDOW_SATURATION_WEIGHTS]   = getUniform("windowSaturationWeights");
+     m_uniformLocations[SHADER_TINT]                        = getUniform("tint");
+     m_uniformLocations[SHADER_GRADIENT]                    = getUniform("gradient");
+     m_uniformLocations[SHADER_GRADIENT_LENGTH]             = getUniform("gradientLength");
+diff --git a/src/render/Shader.hpp b/src/render/Shader.hpp
+index 1d8feb9..7c4ff3f 100644
+--- a/src/render/Shader.hpp
++++ b/src/render/Shader.hpp
+@@ -48,6 +48,8 @@ enum eShaderUniform : uint8_t {
+     SHADER_USE_ALPHA_MATTE,
+     SHADER_APPLY_TINT,
+     SHADER_TINT,
++    SHADER_WINDOW_SATURATION,
++    SHADER_WINDOW_SATURATION_WEIGHTS,
+     SHADER_GRADIENT,
+     SHADER_GRADIENT_LENGTH,
+     SHADER_ANGLE,
+diff --git a/src/render/ShaderLoader.cpp b/src/render/ShaderLoader.cpp
+index 713f403..95495f5 100644
+--- a/src/render/ShaderLoader.cpp
++++ b/src/render/ShaderLoader.cpp
+@@ -81,6 +81,8 @@ std::string CShaderLoader::getDefines(const SShaderVariant& variant) {
+         {"USE_BLUR_MATTE", SH_FEAT_BLUR_MATTE},
+         {"USE_ALT_TONEMAP", SH_FEAT_ALT_TONEMAP},
+         {"USE_BLUR_PROPORTIONAL", SH_FEAT_BLUR_PROPORTIONAL},
++        {"USE_SATURATION", SH_FEAT_SATURATION},
++        {"USE_EXTERNAL", SH_FEAT_EXTERNAL},
+     });
+ 
+     std::string           res;
+diff --git a/src/render/ShaderLoader.hpp b/src/render/ShaderLoader.hpp
+index 744e576..3de32c5 100644
+--- a/src/render/ShaderLoader.hpp
++++ b/src/render/ShaderLoader.hpp
+@@ -10,7 +10,7 @@
+ #include "../helpers/cm/ColorManagement.hpp"
+ 
+ namespace Render {
+-    enum ePreparedFragmentShaderFeature : uint16_t {
++    enum ePreparedFragmentShaderFeature : uint32_t {
+         SH_FEAT_UNKNOWN = 0, // all features just in case
+ 
+         SH_FEAT_RGBA              = (1 << 0),  // RGBA/RGBX texture sampling
+@@ -29,10 +29,13 @@ namespace Render {
+         SH_FEAT_ALT_TONEMAP       = (1 << 13), // condition: tonemapMode == 3
+         SH_FEAT_BLUR_PROPORTIONAL = (1 << 14), // condition: decoration:blur:proportional
+ 
++        SH_FEAT_SATURATION = (1 << 15), // opt-in client-surface saturation
++        SH_FEAT_EXTERNAL   = (1 << 16), // external EGLImage sampling
++
+         // uniforms: targetPrimariesXYZ; condition: SH_FEAT_TONEMAP || SH_FEAT_SDR_MOD
+     };
+ 
+-    using ShaderFeatureFlags = uint16_t;
++    using ShaderFeatureFlags = uint32_t;
+ 
+     constexpr NColorManagement::eTransferFunction SHADER_DEFAULT_TF = NColorManagement::CM_TRANSFER_FUNCTION_SRGB;
+     struct SShaderVariant {
+diff --git a/src/render/gl/GLElementRenderer.cpp b/src/render/gl/GLElementRenderer.cpp
+index f07ba4a..1e6af8b 100644
+--- a/src/render/gl/GLElementRenderer.cpp
++++ b/src/render/gl/GLElementRenderer.cpp
+@@ -113,6 +113,7 @@ void CGLElementRenderer::draw(CRenderContext& ctx, WP<CTexPassElement> element,
+ 
+                                      .primarySurfaceUVTopLeft     = ctx.m_data.primarySurfaceUVTopLeft,
+                                      .primarySurfaceUVBottomRight = ctx.m_data.primarySurfaceUVBottomRight,
++                                     .saturation                  = m_data.saturation,
+                                      .motionBlur                  = m_data.motionBlur,
+                                  });
+ };
+diff --git a/src/render/gl/GLTexture.cpp b/src/render/gl/GLTexture.cpp
+index 41a95f9..416f996 100644
+--- a/src/render/gl/GLTexture.cpp
++++ b/src/render/gl/GLTexture.cpp
+@@ -66,6 +66,7 @@ CGLTexture::CGLTexture(uint32_t drmFormat, uint8_t* pixels, uint32_t stride, con
+ }
+ 
+ CGLTexture::CGLTexture(const Aquamarine::SDMABUFAttrs& attrs, void* image, bool opaque) {
++    m_eglImage = image;
+     m_opaque = opaque;
+     if (!g_pHyprOpenGL->m_proc.glEGLImageTargetTexture2DOES) {
+         LOG(Log::ERR, "Cannot create a dmabuf texture: no glEGLImageTargetTexture2DOES");
+@@ -74,18 +75,19 @@ CGLTexture::CGLTexture(const Aquamarine::SDMABUFAttrs& attrs, void* image, bool
+ 
+     m_opaque = isDrmFormatOpaque(attrs.format);
+ 
+-    // #TODO external only formats should be external as well.
+-    // also needs a separate color shader.
+-    /*if (NFormatUtils::isFormatYUV(attrs.format)) {
++    if (NFormatUtils::isFormatYUV(attrs.format)) {
++        if (!g_pHyprOpenGL->m_exts.OES_EGL_image_external_essl3) {
++            LOG(Log::ERR, "Cannot sample a YUV dmabuf without external EGLImage shader support");
++            return;
++        }
+         m_target = GL_TEXTURE_EXTERNAL_OES;
+         m_type   = TEXTURE_EXTERNAL;
+-    } else {*/
+-    m_target = GL_TEXTURE_2D;
+-    m_type   = isDrmFormatOpaque(attrs.format) ? TEXTURE_RGBX : TEXTURE_RGBA;
+-    //}
++    } else {
++        m_target = GL_TEXTURE_2D;
++        m_type   = m_opaque ? TEXTURE_RGBX : TEXTURE_RGBA;
++    }
+ 
+     allocate(attrs.size, attrs.format);
+-    m_eglImage = image;
+ 
+     bind();
+     setTexParameter(GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+@@ -205,6 +207,10 @@ constexpr std::optional<size_t> CGLTexture::getCacheStateIndex(GLenum pname) {
+ }
+ 
+ void CGLTexture::setTexParameter(GLenum pname, GLint param) {
++    // External EGLImages only allow clamp-to-edge wrapping.
++    if (m_target == GL_TEXTURE_EXTERNAL_OES && (pname == GL_TEXTURE_WRAP_S || pname == GL_TEXTURE_WRAP_T))
++        param = GL_CLAMP_TO_EDGE;
++
+     const auto cacheIndex = getCacheStateIndex(pname);
+ 
+     if (!cacheIndex) {
+diff --git a/src/render/pass/TexPassElement.hpp b/src/render/pass/TexPassElement.hpp
+index 15f3946..c5a6b01 100644
+--- a/src/render/pass/TexPassElement.hpp
++++ b/src/render/pass/TexPassElement.hpp
+@@ -64,6 +64,7 @@ class CTexPassElement : public IPassElement {
+ 
+         CRegion                           clipRegion;
+         PHLLSREF                          currentLS;
++        float                             saturation = 1.F;
+         PHLWINDOWREF                      blurOwner;
+ 
+         SP<Render::ITexture>              blurredBG;
+diff --git a/src/render/shaders/glsl/blurFinish.glsl b/src/render/shaders/glsl/blurFinish.glsl
+index 76678ee..15ead0a 100644
+--- a/src/render/shaders/glsl/blurFinish.glsl
++++ b/src/render/shaders/glsl/blurFinish.glsl
+@@ -39,7 +39,7 @@ vec4 blurFinish(vec4 pixColor, vec2 v_texcoord, float noise, float brightness
+     pixColor.rgb *= brightnessMultiplier;
+ 
+ #if USE_CM
+-    pixColor = doColorManagement(pixColor, 1.0, sourceTF, targetTF, convertMatrix, srcTFRange, dstTFRange, linearNoise);
++    pixColor = doColorManagement(pixColor, 1.0, sourceTF, targetTF, convertMatrix, srcTFRange, dstTFRange, linearNoise, srcRefLuminance);
+ #endif
+ 
+     return pixColor;
+diff --git a/src/render/shaders/glsl/border.glsl b/src/render/shaders/glsl/border.glsl
+index ed4538b..ece134a 100644
+--- a/src/render/shaders/glsl/border.glsl
++++ b/src/render/shaders/glsl/border.glsl
+@@ -102,7 +102,7 @@ vec4
+     pixColor.rgb *= pixColor[3];
+ 
+ #if USE_CM
+-    return doColorManagement(pixColor, alpha * additionalAlpha, sourceTF, targetTF, convertMatrix, srcTFRange, dstTFRange, 0.0
++    return doColorManagement(pixColor, alpha * additionalAlpha, sourceTF, targetTF, convertMatrix, srcTFRange, dstTFRange, 0.0, srcRefLuminance
+ #if USE_ICC
+                              ,
+                              iccLut3D, iccLutSize
+@@ -113,7 +113,7 @@ vec4
+ #endif
+ #if USE_TONEMAP
+                              ,
+-                             maxLuminance, dstMaxLuminance, dstRefLuminance, srcRefLuminance, tonemapMode
++                             maxLuminance, dstMaxLuminance, dstRefLuminance, tonemapMode
+ #endif
+ #if USE_SDR_MOD
+                              ,
+diff --git a/src/render/shaders/glsl/cm_helpers.glsl b/src/render/shaders/glsl/cm_helpers.glsl
+index 5f8f544..31033f0 100644
+--- a/src/render/shaders/glsl/cm_helpers.glsl
++++ b/src/render/shaders/glsl/cm_helpers.glsl
+@@ -209,7 +209,7 @@ vec4[2]
+ #else
+ vec4
+ #endif
+-    doColorManagement(vec4 pixColor, float additionalAlpha, int srcTF, int dstTF, mat3 convertMatrix, vec2 srcTFRange, vec2 dstTFRange, float linearNoise
++    doColorManagement(vec4 pixColor, float additionalAlpha, int srcTF, int dstTF, mat3 convertMatrix, vec2 srcTFRange, vec2 dstTFRange, float linearNoise, float srcRefLuminance
+ #if USE_ICC
+                       ,
+                       highp sampler3D iccLut3D, float iccLutSize
+@@ -220,7 +220,7 @@ vec4
+ #endif
+ #if USE_TONEMAP
+                        ,
+-                       float maxLuminance, float dstMaxLuminance, float dstRefLuminance, float srcRefLuminance, int tonemapMode
++                       float maxLuminance, float dstMaxLuminance, float dstRefLuminance, int tonemapMode
+ #endif
+ #if USE_SDR_MOD
+                        ,
+@@ -245,15 +245,20 @@ vec4
+         pixColor = toNit(pixColor, srcTFRange);
+     pixColor.a   = finalAlpha;
+     pixColor.rgb *= pixColor.a;
++#if USE_MIRROR
++    // The capture copy is SDR, independent of display tone mapping and SDR gain.
++    // PQ desktops may use a reference white above 80 nits; dividing by 80 clips
++    // their colors even though the same SDR content captures correctly as sRGB.
++    vec2 mirrorRange = srcTF == CM_TRANSFER_FUNCTION_GAMMA22 || srcTF == CM_TRANSFER_FUNCTION_SRGB ? srcTFRange : vec2(SDR_MIN_LUMINANCE, SDR_MAX_LUMINANCE);
++    if (srcTF == CM_TRANSFER_FUNCTION_ST2084_PQ && srcRefLuminance > 0.0)
++        mirrorRange = vec2(0.0, srcRefLuminance);
++    // TODO: compress HDR highlights above reference white into the SDR range.
++    vec4 mirrorColor = fromLinearNit(pixColor, CM_TRANSFER_FUNCTION_SRGB, mirrorRange);
++#endif
+ #if USE_TONEMAP
+     pixColor = tonemap(pixColor, dstxyz, maxLuminance, dstMaxLuminance, dstRefLuminance, srcRefLuminance, tonemapMode);
+ #endif
+ 
+-#if USE_MIRROR
+-    // TODO HDR -> SDR tonemap
+-    vec4 mirrorColor = fromLinearNit(pixColor, CM_TRANSFER_FUNCTION_SRGB,
+-                                     srcTF == CM_TRANSFER_FUNCTION_GAMMA22 || srcTF == CM_TRANSFER_FUNCTION_SRGB ? srcTFRange : vec2(SDR_MIN_LUMINANCE, SDR_MAX_LUMINANCE));
+-#endif
+     pixColor = fromLinearNit(pixColor, dstTF, dstTFRange);
+ #if USE_SDR_MOD
+     pixColor = saturate(pixColor, dstxyz, sdrSaturation);
+diff --git a/src/render/shaders/glsl/motion_blur.glsl b/src/render/shaders/glsl/motion_blur.glsl
+index a5a394b..be7c0f8 100644
+--- a/src/render/shaders/glsl/motion_blur.glsl
++++ b/src/render/shaders/glsl/motion_blur.glsl
+@@ -3,37 +3,14 @@
+ 
+ const int MOTION_BLUR_MAX_SAMPLES = 64;
+ 
+-vec4 motionBlurSample(sampler2D texSampler, vec4 previousBox, vec4 currentBox, vec4 sourceBox, vec2 sourceTexOrigin, vec2 sourceTexSize, int requestedSamples,
+-                      bool useRGBA) {
+-    int   samples    = int(clamp(float(requestedSamples), 1.0, float(MOTION_BLUR_MAX_SAMPLES)));
+-    vec4 accumulated = vec4(0.0);
+-
+-    for (int i = 0; i < MOTION_BLUR_MAX_SAMPLES; ++i) {
+-        if (i >= samples)
+-            break;
+-
+-        float t  = float(i) / float(samples);
+-        vec4  box = mix(currentBox, previousBox, t);
+-        if (box.z <= 0.0 || box.w <= 0.0)
+-            continue;
+-
+-        vec2  uv  = (vec2(gl_FragCoord) - box.xy) / box.zw;
+-
+-        if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0)
+-            continue;
+-
+-        vec2 sourceUV = (sourceBox.xy + uv * sourceBox.zw - sourceTexOrigin) / sourceTexSize;
+-        vec4 color    = texture(texSampler, sourceUV);
+-        if (!useRGBA)
+-            color.a = 1.0;
+-
+-        accumulated += color;
+-    }
+-
+-    if (accumulated.a == 0.0)
+-        return vec4(0.0);
+-
+-    return accumulated / float(samples);
+-}
++#define MOTION_BLUR_SAMPLER sampler2D
++#include "motion_blur_sample.glsl"
++#undef MOTION_BLUR_SAMPLER
++
++#if USE_EXTERNAL
++#define MOTION_BLUR_SAMPLER samplerExternalOES
++#include "motion_blur_sample.glsl"
++#undef MOTION_BLUR_SAMPLER
++#endif
+ 
+ #endif
+diff --git a/src/render/shaders/glsl/motion_blur_sample.glsl b/src/render/shaders/glsl/motion_blur_sample.glsl
+new file mode 100644
+index 0000000..8885047
+--- /dev/null
++++ b/src/render/shaders/glsl/motion_blur_sample.glsl
+@@ -0,0 +1,34 @@
++// Included for each sampler type; keep the sampling algorithm identical.
++vec4 motionBlurSample(MOTION_BLUR_SAMPLER texSampler, vec4 previousBox, vec4 currentBox, vec4 sourceBox, vec2 sourceTexOrigin, vec2 sourceTexSize, int requestedSamples,
++                      bool useRGBA) {
++    int   samples    = int(clamp(float(requestedSamples), 1.0, float(MOTION_BLUR_MAX_SAMPLES)));
++    vec4 accumulated = vec4(0.0);
++
++    for (int i = 0; i < MOTION_BLUR_MAX_SAMPLES; ++i) {
++        if (i >= samples)
++            break;
++
++        float t  = float(i) / float(samples);
++        vec4  box = mix(currentBox, previousBox, t);
++        if (box.z <= 0.0 || box.w <= 0.0)
++            continue;
++
++        vec2  uv  = (vec2(gl_FragCoord) - box.xy) / box.zw;
++
++        if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0)
++            continue;
++
++        vec2 sourceUV = (sourceBox.xy + uv * sourceBox.zw - sourceTexOrigin) / sourceTexSize;
++        vec4 color    = texture(texSampler, sourceUV);
++        if (!useRGBA)
++            color.a = 1.0;
++
++        accumulated += color;
++    }
++
++    if (accumulated.a == 0.0)
++        return vec4(0.0);
++
++    return accumulated / float(samples);
++}
++
+diff --git a/src/render/shaders/glsl/rgbamatte.frag b/src/render/shaders/glsl/rgbamatte.frag
+index 72fdc1d..363e522 100644
+--- a/src/render/shaders/glsl/rgbamatte.frag
++++ b/src/render/shaders/glsl/rgbamatte.frag
+@@ -3,10 +3,17 @@
+ #extension GL_ARB_shading_language_include : enable
+ 
+ #include "defines.h"
++#if USE_EXTERNAL
++#extension GL_OES_EGL_image_external_essl3 : require
++#endif
+ 
+ precision         highp float;
+ in vec2           v_texcoord; // is in 0-1
++#if USE_EXTERNAL
++uniform highp samplerExternalOES tex;
++#else
+ uniform sampler2D tex;
++#endif
+ uniform sampler2D texMatte;
+ 
+ layout(location = 0) out vec4 fragColor;
+diff --git a/src/render/shaders/glsl/surface.frag b/src/render/shaders/glsl/surface.frag
+index ceeab12..80c82e8 100644
+--- a/src/render/shaders/glsl/surface.frag
++++ b/src/render/shaders/glsl/surface.frag
+@@ -3,10 +3,17 @@
+ #extension GL_ARB_shading_language_include : enable
+ 
+ #include "defines.h"
++#if USE_EXTERNAL
++#extension GL_OES_EGL_image_external_essl3 : require
++#endif
+ 
+ precision         highp float;
+ in vec2           v_texcoord;
++#if USE_EXTERNAL
++uniform highp samplerExternalOES tex;
++#else
+ uniform sampler2D tex;
++#endif
+ #if USE_BLUR
+ uniform vec2      uvSize;
+ uniform vec2      uvOffset;
+@@ -18,6 +25,10 @@ uniform sampler2D blurAlphaMatte;
+ #endif
+ 
+ uniform float alpha;
++#if USE_SATURATION
++uniform float windowSaturation;
++uniform vec3 windowSaturationWeights;
++#endif
+ 
+ #if USE_DISCARD
+ uniform bool  discardOpaque;
+@@ -93,13 +104,19 @@ void main() {
+         discard;
+ #endif
+ 
++#if USE_SATURATION
++    // Operate on the client sample only, before color management and background blending.
++    float gray = dot(pixColor.rgb, windowSaturationWeights);
++    float peak = max(pixColor.a, max(pixColor.r, max(pixColor.g, pixColor.b)));
++    pixColor.rgb = clamp(mix(vec3(gray), pixColor.rgb, windowSaturation), vec3(0.0), vec3(peak));
++#endif
+ #if USE_CM
+ #if USE_MIRROR
+     vec4[2] pixColors =
+ #else
+     pixColor =
+ #endif
+-        doColorManagement(pixColor, alpha, sourceTF, targetTF, convertMatrix, srcTFRange, dstTFRange, 0.0
++        doColorManagement(pixColor, alpha, sourceTF, targetTF, convertMatrix, srcTFRange, dstTFRange, 0.0, srcRefLuminance
+ #if USE_ICC
+                           ,
+                           iccLut3D, iccLutSize
+@@ -110,7 +127,7 @@ void main() {
+ #endif
+ #if USE_TONEMAP
+                           ,
+-                          maxLuminance, dstMaxLuminance, dstRefLuminance, srcRefLuminance, tonemapMode
++                          maxLuminance, dstMaxLuminance, dstRefLuminance, tonemapMode
+ #endif
+ #if USE_SDR_MOD
+                           ,
+diff --git a/tests/helpers/ClientImageDescription.cpp b/tests/helpers/ClientImageDescription.cpp
+new file mode 100644
+index 0000000..d583b13
+--- /dev/null
++++ b/tests/helpers/ClientImageDescription.cpp
+@@ -0,0 +1,66 @@
++#include <helpers/cm/ClientImageDescription.hpp>
++#include <gtest/gtest.h>
++
++#include <limits>
++
++using namespace NColorManagement;
++
++static PImageDescription hdrOutput() {
++    return CImageDescription::from(SImageDescription{
++        .transferFunction    = CM_TRANSFER_FUNCTION_ST2084_PQ,
++        .primariesNameSet    = true,
++        .primariesNamed      = CM_PRIMARIES_BT2020,
++        .primaries           = NColorPrimaries::BT2020,
++        .luminances          = {.min = 0.0969F, .max = 486, .reference = 203},
++        .masteringLuminances = {.min = 0.0969F, .max = 486},
++        .maxCLL              = 486,
++        .maxFALL             = 486,
++    });
++}
++
++TEST(ClientImageDescription, MatchesConfiguredSDRWhiteWithoutChangingScanout) {
++    const auto output = hdrOutput();
++    const auto client = withSDRReferenceWhite(output, 251.0 * 1.2);
++    EXPECT_EQ(client->value().luminances.reference, 301U);
++    EXPECT_EQ(output->value().luminances.reference, 203U);
++    auto expected                 = output->value();
++    expected.luminances.reference = 301;
++    EXPECT_TRUE(client->value() == expected);
++    EXPECT_GT(client->value().masteringLuminances.max, client->value().luminances.reference);
++}
++
++TEST(ClientImageDescription, SDRWhiteChangesProduceNewDescriptionIdentities) {
++    const auto output = hdrOutput();
++    const auto first  = withSDRReferenceWhite(output, 251);
++    const auto second = withSDRReferenceWhite(output, 301);
++    EXPECT_NE(first->id(), second->id());
++    EXPECT_EQ(first->id(), withSDRReferenceWhite(output, 251)->id());
++}
++
++TEST(ClientImageDescription, ClampsToDisplayPeak) {
++    const auto output = hdrOutput();
++    EXPECT_EQ(withSDRReferenceWhite(output, 1000)->value().luminances.reference, 486U);
++    EXPECT_EQ(withSDRReferenceWhite(output, 0.1)->value().luminances.reference, 1U);
++}
++
++TEST(ClientImageDescription, InvalidWhiteDoesNotChangeDescription) {
++    const auto output = hdrOutput();
++    for (const double value : {0.0, -1.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()})
++        EXPECT_EQ(withSDRReferenceWhite(output, value), output);
++}
++
++TEST(ClientImageDescription, SDRAndHLGDescriptionsRemainUnchanged) {
++    const auto sdr            = CImageDescription::from(SImageDescription{});
++    auto       hlgValue       = hdrOutput()->value();
++    hlgValue.transferFunction = CM_TRANSFER_FUNCTION_HLG;
++    const auto hlg            = CImageDescription::from(hlgValue);
++    EXPECT_EQ(withSDRReferenceWhite(sdr, 301), sdr);
++    EXPECT_EQ(withSDRReferenceWhite(hlg, 301), hlg);
++}
++
++TEST(ClientImageDescription, ICCDescriptionRemainsUnchanged) {
++    auto value        = hdrOutput()->value();
++    value.icc.present = true;
++    const auto output = CImageDescription::from(value);
++    EXPECT_EQ(withSDRReferenceWhite(output, 301), output);
++}
+diff --git a/tests/helpers/Format.cpp b/tests/helpers/Format.cpp
+index bf3d205..20582d8 100644
+--- a/tests/helpers/Format.cpp
++++ b/tests/helpers/Format.cpp
+@@ -6,6 +6,7 @@
+ #include <wayland-server-protocol.h>
+ #include <hyprgraphics/egl/Egl.hpp>
+ #include <limits>
++#include <array>
+ 
+ using namespace Hyprgraphics::Egl;
+ using namespace NFormatUtils;
+@@ -33,6 +34,12 @@ TEST(Helpers, formatIsFormatYUV) {
+     EXPECT_FALSE(isFormatYUV(DRM_FORMAT_ARGB8888));
+ }
+ 
++TEST(Helpers, formatP010IsYUVNotRGB10) {
++    EXPECT_TRUE(isFormatYUV(DRM_FORMAT_P010));
++    EXPECT_FALSE(isFormatYUV(DRM_FORMAT_XRGB2101010));
++    EXPECT_FALSE(isFormatYUV(DRM_FORMAT_ARGB2101010));
++}
++
+ TEST(Helpers, formatGetPixelFormatFromDRM) {
+     const auto* xrgb = getPixelFormatFromDRM(DRM_FORMAT_XRGB8888);
+     ASSERT_NE(xrgb, nullptr);
+@@ -96,3 +103,45 @@ TEST(Helpers, formatAlphaFormat) {
+     // Format without alpha stripped entry returns DRM_FORMAT_INVALID (0)
+     EXPECT_EQ(alphaFormat(DRM_FORMAT_ARGB8888), 0u);
+ }
++
++TEST(Helpers, formatTexture2DRejectsExternalOnlyVideo) {
++    const std::array<uint64_t, 2>   modifiers = {0x0200000000082305ULL, DRM_FORMAT_MOD_LINEAR};
++    const std::array<EGLBoolean, 2> external  = {EGL_TRUE, EGL_TRUE};
++    EXPECT_FALSE(getTexture2DModifiers(modifiers, external).has_value());
++}
++
++TEST(Helpers, formatTexture2DRejectsExternalOnlyWithoutLinear) {
++    const std::array<uint64_t, 1>   modifiers = {0x0200000000082305ULL};
++    const std::array<EGLBoolean, 1> external  = {EGL_TRUE};
++    EXPECT_FALSE(getTexture2DModifiers(modifiers, external).has_value());
++}
++
++TEST(Helpers, formatTexture2DPreservesRGBAndLinear) {
++    const std::array<uint64_t, 2>   modifiers = {0x0200000000082305ULL, DRM_FORMAT_MOD_LINEAR};
++    const std::array<EGLBoolean, 2> external  = {EGL_FALSE, EGL_FALSE};
++    const auto                      result    = getTexture2DModifiers(modifiers, external);
++    ASSERT_TRUE(result.has_value());
++    EXPECT_EQ(*result, (std::vector<uint64_t>{modifiers[0], DRM_FORMAT_MOD_LINEAR}));
++}
++
++TEST(Helpers, formatTexture2DFiltersExternalLinearFromMixedSupport) {
++    const std::array<uint64_t, 2>   modifiers = {0x0200000000082305ULL, DRM_FORMAT_MOD_LINEAR};
++    const std::array<EGLBoolean, 2> external  = {EGL_FALSE, EGL_TRUE};
++    const auto                      result    = getTexture2DModifiers(modifiers, external);
++    ASSERT_TRUE(result.has_value());
++    EXPECT_EQ(*result, (std::vector<uint64_t>{modifiers[0]}));
++}
++
++TEST(Helpers, formatTexture2DPreservesImplicitOnlyFallback) {
++    const auto result = getTexture2DModifiers({}, {});
++    ASSERT_TRUE(result.has_value());
++    EXPECT_TRUE(result->empty());
++}
++
++TEST(Helpers, formatTexture2DKeepsLinearFallbackForSupportedFormat) {
++    const std::array<uint64_t, 1>   modifiers = {0x0200000000082305ULL};
++    const std::array<EGLBoolean, 1> external  = {EGL_FALSE};
++    const auto                      result    = getTexture2DModifiers(modifiers, external);
++    ASSERT_TRUE(result.has_value());
++    EXPECT_EQ(*result, (std::vector<uint64_t>{modifiers[0], DRM_FORMAT_MOD_LINEAR}));
++}
+diff --git a/tests/protocols/DMABUF.cpp b/tests/protocols/DMABUF.cpp
+index e2b5189..adc4a0c 100644
+--- a/tests/protocols/DMABUF.cpp
++++ b/tests/protocols/DMABUF.cpp
+@@ -8,6 +8,7 @@
+ #include <config/shared/inotify/ConfigWatcher.hpp>
+ #include <event/EventBus.hpp>
+ #include <managers/eventLoop/EventLoopManager.hpp>
++#include <managers/TokenManager.hpp>
+ #include <output/MonitorResources.hpp>
+ #include <render/Renderer.hpp>
+ #include <render/SceneResources.hpp>
+@@ -1613,3 +1614,62 @@ TEST_P(CMesaDMABUFRejectedTest, ClosesIncomingPrimeFD) {
+ 
+ INSTANTIATE_TEST_SUITE_P(InvalidDimensionsAndOffset, CMesaDMABUFRejectedTest,
+                          ::testing::Values(std::array<int32_t, 3>{0, 1, 0}, std::array<int32_t, 3>{1, 0, 0}, std::array<int32_t, 3>{1, 1, -1}));
++
++
++TEST_F(CRenderLifecycleTest, ScanoutFeedbackRequiresRendererFallback) {
++    auto previousTokens = std::move(g_pTokenManager);
++    const Hyprutils::Utils::CScopeGuard restoreTokens{[&] { g_pTokenManager = std::move(previousTokens); }};
++    g_pTokenManager = makeUnique<CTokenManager>();
++    constexpr uint64_t supported = 0x0200000000082305ULL;
++    constexpr uint64_t externalOnly = 0x0200000000042305ULL;
++    const SDMABUFTranche renderer = {
++        .formats = {{.drmFormat = DRM_FORMAT_XRGB2101010, .modifiers = {supported}}},
++    };
++    const SDMABUFTranche scanout = {
++        .flags = ZWP_LINUX_DMABUF_FEEDBACK_V1_TRANCHE_FLAGS_SCANOUT,
++        .formats = {
++            {.drmFormat = DRM_FORMAT_XRGB2101010, .modifiers = {supported, externalOnly}},
++            {.drmFormat = DRM_FORMAT_P010, .modifiers = {supported}},
++        },
++    };
++    const CDMABUFFormatTable table(renderer, {{m_monitor, scanout}});
++    ASSERT_TRUE(table.m_tableFD.isValid());
++    ASSERT_EQ(table.m_monitorTranches.size(), 1U);
++    EXPECT_EQ(table.m_monitorTranches[0].second.indices.size(), 1U);
++    EXPECT_EQ(table.m_tableSize, sizeof(SDMABUFFormatTableEntry));
++    EXPECT_EQ(table.m_monitorTranches[0].second.indices, table.m_rendererTranche.indices);
++}
++
++TEST_F(CRenderLifecycleTest, ContentLightLevelControlsPQTonemapPeak) {
++    using namespace NColorManagement;
++    struct SCase {
++        uint32_t maxCLL;
++        bool sdrTarget;
++        bool needsTonemap;
++        float peak;
++    };
++    const std::array<SCase, 6> cases = {{
++        {203, false, false, 203.F},
++        {486, false, false, 486.F},
++        {1000, false, true, 1000.F},
++        {0, false, true, 1000.F},
++        {203, true, true, 203.F},
++        {20000, false, true, 10000.F},
++    }};
++    auto& ctx = renderer().context();
++    ctx.m_data.pMonitor = m_monitor;
++    for (const auto& test : cases) {
++        SCOPED_TRACE(::testing::Message() << "MaxCLL=" << test.maxCLL << " SDR=" << test.sdrTarget);
++        auto src = BT2100_IMAGE_DESCRIPTION->value();
++        src.luminances = {.min = 0.F, .max = 1000, .reference = 203};
++        src.maxCLL = test.maxCLL;
++        auto dst = LINEAR_NN_IMAGE_DESCRIPTION->value();
++        dst.transferFunction = test.sdrTarget ? CM_TRANSFER_FUNCTION_SRGB : CM_TRANSFER_FUNCTION_LINEAR;
++        dst.luminances = {.min = 0.F, .max = test.sdrTarget ? 80U : 486U, .reference = test.sdrTarget ? 80U : 203U};
++        renderer().clearCMSettingsCache(ctx);
++        const auto settings = renderer().getCMSettings(ctx, CImageDescription::from(src), CImageDescription::from(dst));
++        EXPECT_EQ(settings.needsTonemap, test.needsTonemap);
++        EXPECT_FLOAT_EQ(settings.maxLuminance, test.peak);
++        EXPECT_EQ(settings.sourceTF, CM_TRANSFER_FUNCTION_ST2084_PQ);
++    }
++}
+diff --git a/tests/render/ExternalTexture.cpp b/tests/render/ExternalTexture.cpp
+new file mode 100644
+index 0000000..2fcdb73
+--- /dev/null
++++ b/tests/render/ExternalTexture.cpp
+@@ -0,0 +1,212 @@
++#include <render/ShaderLoader.hpp>
++#include <config/ConfigManager.hpp>
++#include <glslang/Public/resource_limits_c.h>
++
++#include <gtest/gtest.h>
++
++#include <algorithm>
++#include <array>
++#include <cctype>
++#include <filesystem>
++#include <utility>
++
++using namespace Render;
++
++// Keep shader preprocessing independent of a compositor, Lua state, and user config.
++class CExternalTextureConfigManager : public Config::IConfigManager {
++  public:
++    Config::eConfigManagerType type() override {
++        return Config::CONFIG_LUA;
++    }
++    void init() override {
++        ;
++    }
++    void reload() override {
++        ;
++    }
++    std::string verify() override {
++        return {};
++    }
++    int getDeviceInt(const std::string&, const std::string&, const std::string&) override {
++        return 0;
++    }
++    float getDeviceFloat(const std::string&, const std::string&, const std::string&) override {
++        return 0.F;
++    }
++    Vector2D getDeviceVec(const std::string&, const std::string&, const std::string&) override {
++        return {};
++    }
++    std::string getDeviceString(const std::string&, const std::string&, const std::string&) override {
++        return {};
++    }
++    bool deviceConfigExplicitlySet(const std::string&, const std::string&) override {
++        return false;
++    }
++    bool deviceConfigExists(const std::string&) override {
++        return false;
++    }
++
++    Config::SConfigOptionReply getConfigValue(const std::string& name) override {
++        EXPECT_EQ(name, "render:cm_enabled");
++        // getVariantSource caches a CConfigValue; its backing must outlive this manager.
++        static bool  enabled = true;
++        static void* value   = &enabled;
++        return {.dataptr = &value, .type = &typeid(bool)};
++    }
++
++    std::string getMainConfigPath() override {
++        return {};
++    }
++    std::string currentConfigPath() override {
++        return {};
++    }
++    std::string getConfigString() override {
++        return {};
++    }
++    const std::vector<std::string>& getConfigPaths() override {
++        return m_paths;
++    }
++    bool configLoaded() override {
++        return true;
++    }
++    bool configVerifPassed() override {
++        return true;
++    }
++    std::string getErrors() override {
++        return {};
++    }
++
++    std::expected<void, std::string> generateDefaultConfig(const std::filesystem::path&, bool) override {
++        return {};
++    }
++    void handlePluginLoads() override {
++        ;
++    }
++    std::expected<void, std::string> registerPluginValue(void*, SP<Config::Values::IValue>) override {
++        return {};
++    }
++    void onPluginUnload(void*) override {
++        ;
++    }
++    void warnDeprecated(std::string, std::string) override {
++        ;
++    }
++    void clearDeprecations() override {
++        ;
++    }
++    std::vector<std::string> deprecationNotices() const override {
++        return {};
++    }
++
++  private:
++    std::vector<std::string> m_paths;
++};
++
++class ExternalTexture : public ::testing::Test {
++  protected:
++    void SetUp() override {
++        m_glslangInitialized = glslang_initialize_process();
++        ASSERT_TRUE(m_glslangInitialized);
++        m_previousConfig = std::move(Config::mgr());
++        Config::mgr()    = makeUnique<CExternalTextureConfigManager>();
++    }
++
++    void TearDown() override {
++        if (m_glslangInitialized) {
++            Config::mgr() = std::move(m_previousConfig);
++            glslang_finalize_process();
++        }
++    }
++
++  private:
++    bool                       m_glslangInitialized = false;
++    UP<Config::IConfigManager> m_previousConfig;
++};
++
++TEST_F(ExternalTexture, surfaceVariantUsesExternalSamplerAndRetainsColorManagement) {
++    // Match OpenGL.cpp's include set. Every fragment slot must contain a valid file.
++    const std::vector<std::string> includes = {
++        "defines.h",     "constants.h",      "cm_helpers.glsl",  "rounding.glsl", "CM.glsl",    "tonemap.glsl",    "gain.glsl",        "border.glsl",
++        "shadow.glsl",   "inner_glow.glsl",  "blurprepare.glsl", "blur1.glsl",    "blur2.glsl", "blurFinish.glsl", "motion_blur.glsl", "motion_blur_sample.glsl",
++        "gradient.glsl", "glassFinish.glsl", "fluidJar.glsl",
++    };
++    std::array<std::string, SH_FRAG_LAST> frags;
++    frags.fill("surface.frag");
++    const auto     shaderPath = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() / "src/render/shaders/glsl";
++    CShaderLoader  loader(includes, frags, shaderPath.string());
++
++    SShaderVariant variant{
++        .features = SH_FEAT_RGBA | SH_FEAT_CM | SH_FEAT_TONEMAP,
++        .sourceTF = NColorManagement::CM_TRANSFER_FUNCTION_ST2084_PQ,
++        .targetTF = NColorManagement::CM_TRANSFER_FUNCTION_SRGB,
++    };
++
++    for (const bool external : {false, true}) {
++        SCOPED_TRACE(external ? "external" : "texture2D");
++        if (external)
++            variant.features |= SH_FEAT_EXTERNAL;
++
++        for (const ShaderFeatureFlags extra : std::array<ShaderFeatureFlags, 9>{
++                 0, SH_FEAT_MOTION_BLUR, SH_FEAT_MOTION_BLUR | SH_FEAT_BLUR | SH_FEAT_BLUR_MATTE, SH_FEAT_ICC, SH_FEAT_MIRROR, SH_FEAT_SATURATION, SH_FEAT_SATURATION | SH_FEAT_ICC,
++                 SH_FEAT_SATURATION | SH_FEAT_MIRROR, SH_FEAT_SATURATION | SH_FEAT_MOTION_BLUR | SH_FEAT_BLUR | SH_FEAT_BLUR_MATTE}) {
++            SCOPED_TRACE(extra);
++            auto compiledVariant = variant;
++            compiledVariant.features |= extra;
++            if (extra == SH_FEAT_SATURATION)
++                compiledVariant.features &= ~(SH_FEAT_CM | SH_FEAT_TONEMAP);
++            auto compiledSource = loader.getVariantSource(SH_FRAG_SURFACE, compiledVariant);
++            ASSERT_FALSE(compiledSource.empty());
++            if (extra & SH_FEAT_SATURATION)
++                EXPECT_NE(compiledSource.find("windowSaturation"), std::string::npos);
++            const glslang_input_t input = {
++                .language        = GLSLANG_SOURCE_GLSL,
++                .stage           = GLSLANG_STAGE_FRAGMENT,
++                .client          = GLSLANG_CLIENT_NONE,
++                .target_language = GLSLANG_TARGET_NONE,
++                .code            = compiledSource.c_str(),
++                .default_version = 300,
++                .default_profile = GLSLANG_ES_PROFILE,
++                .messages        = GLSLANG_MSG_DEFAULT_BIT,
++                .resource        = glslang_default_resource(),
++            };
++            auto* shader = glslang_shader_create(&input);
++            ASSERT_NE(shader, nullptr);
++            const bool preprocessed = glslang_shader_preprocess(shader, &input);
++            EXPECT_TRUE(preprocessed) << glslang_shader_get_info_log(shader);
++            if (preprocessed)
++                EXPECT_TRUE(glslang_shader_parse(shader, &input)) << glslang_shader_get_info_log(shader);
++            glslang_shader_delete(shader);
++        }
++
++        auto source = loader.getVariantSource(SH_FRAG_SURFACE, variant);
++        ASSERT_FALSE(source.empty());
++        ASSERT_EQ(source.find("#include"), std::string::npos) << "Shader preprocessing failed";
++        std::erase_if(source, [](unsigned char c) { return std::isspace(c); });
++
++        if (external) {
++            EXPECT_NE(source.find("samplerExternalOEStex;"), std::string::npos);
++            EXPECT_EQ(source.find("uniformsampler2Dtex;"), std::string::npos);
++            EXPECT_NE(source.find("GL_OES_EGL_image_external_essl3"), std::string::npos);
++        } else {
++            EXPECT_NE(source.find("uniformsampler2Dtex;"), std::string::npos);
++            EXPECT_EQ(source.find("samplerExternalOES"), std::string::npos);
++        }
++
++        EXPECT_NE(source.find("texture(tex,v_texcoord)"), std::string::npos);
++        EXPECT_NE(source.find("pixColor=doColorManagement(pixColor,alpha,sourceTF,targetTF,convertMatrix"), std::string::npos);
++        EXPECT_NE(source.find("pixColor.rgb=toLinearRGB(pixColor.rgb,srcTF);"), std::string::npos);
++        EXPECT_NE(source.find("pixColor.rgb=convertMatrix*pixColor.rgb;"), std::string::npos);
++        EXPECT_NE(source.find("pixColor=tonemap(pixColor,"), std::string::npos);
++        EXPECT_NE(source.find("pixColor=fromLinearNit(pixColor,dstTF,dstTFRange);"), std::string::npos);
++    }
++}
++
++TEST(ShaderFeatureFlags, HDRFlagsRemainDistinctFromProportionalBlur) {
++    const ShaderFeatureFlags flags = SH_FEAT_EXTERNAL | SH_FEAT_SATURATION | SH_FEAT_BLUR_PROPORTIONAL;
++    EXPECT_EQ(flags & SH_FEAT_EXTERNAL, SH_FEAT_EXTERNAL);
++    EXPECT_EQ(flags & SH_FEAT_SATURATION, SH_FEAT_SATURATION);
++    EXPECT_EQ(flags & SH_FEAT_BLUR_PROPORTIONAL, SH_FEAT_BLUR_PROPORTIONAL);
++    EXPECT_EQ(SH_FEAT_EXTERNAL & SH_FEAT_BLUR_PROPORTIONAL, 0);
++    EXPECT_EQ(SH_FEAT_EXTERNAL & SH_FEAT_SATURATION, 0);
++    EXPECT_EQ(SH_FEAT_SATURATION & SH_FEAT_BLUR_PROPORTIONAL, 0);
++}
+diff --git a/tests/render/ScreenCaptureColorGPU.cpp b/tests/render/ScreenCaptureColorGPU.cpp
+new file mode 100644
+index 0000000..995bb63
+--- /dev/null
++++ b/tests/render/ScreenCaptureColorGPU.cpp
+@@ -0,0 +1,149 @@
++#include <EGL/egl.h>
++#include <EGL/eglext.h>
++#include <GLES3/gl3.h>
++#include <gtest/gtest.h>
++#include <array>
++#include <cmath>
++#include <render/shaders/Shaders.hpp>
++
++class ScreenCaptureColorGPU : public ::testing::Test {
++  protected:
++    void SetUp() override {
++        previousDisplay = eglGetCurrentDisplay();
++        previousContext = eglGetCurrentContext();
++        previousDraw    = eglGetCurrentSurface(EGL_DRAW);
++        previousRead    = eglGetCurrentSurface(EGL_READ);
++        if (previousContext != EGL_NO_CONTEXT)
++            GTEST_SKIP() << "GPU test requires no existing current context";
++        display = eglGetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
++        if (display == EGL_NO_DISPLAY || !eglInitialize(display, nullptr, nullptr))
++            GTEST_SKIP() << "No surfaceless EGL display";
++        initialized = true;
++        ASSERT_TRUE(eglBindAPI(EGL_OPENGL_ES_API));
++        const EGLint attrs[] = {EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT, EGL_NONE};
++        EGLConfig    config  = nullptr;
++        EGLint       count   = 0;
++        ASSERT_TRUE(eglChooseConfig(display, attrs, &config, 1, &count));
++        ASSERT_GT(count, 0);
++        const EGLint contextAttrs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
++        context                     = eglCreateContext(display, config, EGL_NO_CONTEXT, contextAttrs);
++        ASSERT_NE(context, EGL_NO_CONTEXT);
++        ASSERT_TRUE(eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, context));
++
++        // Use the production transfer functions and mirror conversion on a real GPU.
++        std::string constants, helpers;
++        for (const auto& [name, text] : SHADERS) {
++            if (name == "constants.h")
++                constants = text;
++            if (name == "cm_helpers.glsl")
++                helpers = text;
++        }
++        ASSERT_FALSE(helpers.empty());
++        for (const auto& include : {std::string("#include \"defines.h\""), std::string("#include \"constants.h\"")}) {
++            const auto pos = helpers.find(include);
++            ASSERT_NE(pos, std::string::npos);
++            helpers.erase(pos, include.size());
++        }
++        const std::string fragment = "#version 300 es\nprecision highp float;\nprecision highp int;\n#define ALLOW_INCLUDES\n#define USE_MIRROR 1\n#define USE_ICC 0\n#define "
++                                     "USE_TONEMAP 0\n#define USE_SDR_MOD 0\n" +
++            constants + helpers +
++            "\nuniform vec4 inputColor; uniform float referenceWhite; uniform int sourceTF; uniform int outputIndex; out vec4 fragColor;\n"
++            "void main(){vec2 range=sourceTF==11 ? vec2(0,10000) : vec2(0.2,251);"
++            "vec4 encoded=inputColor; if(sourceTF==11) encoded.rgb=tfPQ(tfInvSRGB(inputColor.rgb/max(inputColor.a,0.001))*referenceWhite/10000.0)*inputColor.a;"
++            "vec4 result[2]=doColorManagement(encoded,1.0,sourceTF,0,mat3(1),range,vec2(0,10000),0.0,referenceWhite);fragColor=result[outputIndex];}";
++        const std::string vertex = "#version 300 es\nvoid main(){vec2 p[3]=vec2[3](vec2(-1,-1),vec2(3,-1),vec2(-1,3));gl_Position=vec4(p[gl_VertexID],0,1);}";
++        program                  = glCreateProgram();
++        for (const auto& [kind, text] : std::array<std::pair<GLenum, std::string>, 2>{{{GL_VERTEX_SHADER, vertex}, {GL_FRAGMENT_SHADER, fragment}}}) {
++            const auto  shader = glCreateShader(kind);
++            const char* ptr    = text.c_str();
++            glShaderSource(shader, 1, &ptr, nullptr);
++            glCompileShader(shader);
++            GLint compiled = 0;
++            glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
++            std::array<char, 4096> log{};
++            glGetShaderInfoLog(shader, log.size(), nullptr, log.data());
++            EXPECT_TRUE(compiled) << log.data();
++            glAttachShader(program, shader);
++            glDeleteShader(shader);
++        }
++        glLinkProgram(program);
++        GLint linked = 0;
++        glGetProgramiv(program, GL_LINK_STATUS, &linked);
++        ASSERT_TRUE(linked);
++        glUseProgram(program);
++        glGenTextures(1, &texture);
++        glBindTexture(GL_TEXTURE_2D, texture);
++        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1, 1, 0, GL_RGBA, GL_FLOAT, nullptr);
++        glGenFramebuffers(1, &framebuffer);
++        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
++        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
++        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
++            GTEST_SKIP() << "No float framebuffer support";
++        glViewport(0, 0, 1, 1);
++        glDisable(GL_BLEND);
++
++        ASSERT_EQ(glGetError(), GL_NO_ERROR);
++    }
++
++    void TearDown() override {
++        if (context != EGL_NO_CONTEXT) {
++            glDeleteFramebuffers(1, &framebuffer);
++            glDeleteTextures(1, &texture);
++            glDeleteProgram(program);
++            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
++            eglDestroyContext(display, context);
++        }
++        if (initialized)
++            eglTerminate(display);
++        if (previousDisplay != EGL_NO_DISPLAY)
++            eglMakeCurrent(previousDisplay, previousDraw, previousRead, previousContext);
++    }
++
++    std::array<float, 4> sample(const std::array<float, 4>& input, float white, int tf = 11, int outputIndex = 1) {
++        glUniform4fv(glGetUniformLocation(program, "inputColor"), 1, input.data());
++        glUniform1f(glGetUniformLocation(program, "referenceWhite"), white);
++        glUniform1i(glGetUniformLocation(program, "sourceTF"), tf);
++        glUniform1i(glGetUniformLocation(program, "outputIndex"), outputIndex);
++        glDrawArrays(GL_TRIANGLES, 0, 3);
++        std::array<float, 4> output{};
++        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, output.data());
++        EXPECT_EQ(glGetError(), GL_NO_ERROR);
++        return output;
++    }
++
++    EGLDisplay display = EGL_NO_DISPLAY, previousDisplay = EGL_NO_DISPLAY;
++    EGLContext context = EGL_NO_CONTEXT, previousContext = EGL_NO_CONTEXT;
++    EGLSurface previousDraw = EGL_NO_SURFACE, previousRead = EGL_NO_SURFACE;
++    bool       initialized = false;
++    GLuint     program = 0, texture = 0, framebuffer = 0;
++};
++
++TEST_F(ScreenCaptureColorGPU, PQDesktopMatchesSDRCaptureAtDifferentReferenceWhites) {
++    for (const float white : {80.F, 203.F, 301.F}) {
++        for (const auto& input : std::array<std::array<float, 4>, 4>{{{0, 0, 0, 1}, {.5F, .5F, .5F, 1}, {.8F, .3F, .1F, 1}, {1, 1, 1, 1}}}) {
++            const auto output = sample(input, white);
++            for (size_t i = 0; i < 4; ++i)
++                EXPECT_NEAR(output[i], input[i], .001F) << "white=" << white << " channel=" << i;
++        }
++    }
++}
++
++TEST_F(ScreenCaptureColorGPU, PreservesPremultipliedAlpha) {
++    for (const auto& input : std::array<std::array<float, 4>, 3>{{{.3F, .15F, .1F, .5F}, {0, 0, 0, 0}, {.2F, .2F, .2F, .25F}}}) {
++        const auto output = sample(input, 301.F);
++        for (size_t i = 0; i < 4; ++i)
++            EXPECT_NEAR(output[i], input[i], .001F);
++    }
++}
++
++TEST_F(ScreenCaptureColorGPU, SDRCaptureAndHDRDisplayRemainUnchanged) {
++    const std::array<float, 4> input{.5F, .5F, .5F, 1};
++    const auto                 sdr = sample(input, 301.F, 9);
++    for (size_t i = 0; i < 4; ++i)
++        EXPECT_NEAR(sdr[i], input[i], .0001F);
++    const auto  hdr          = sample(input, 301.F, 11, 0);
++    const float expectedNits = std::pow((.5F + .055F) / 1.055F, 2.4F) * 301.F;
++    for (size_t i = 0; i < 3; ++i)
++        EXPECT_NEAR(hdr[i], expectedNits, .02F);
++    EXPECT_FLOAT_EQ(hdr[3], 1.F);
++}
+diff --git a/tests/render/WindowSaturation.cpp b/tests/render/WindowSaturation.cpp
+new file mode 100644
+index 0000000..ffd2c32
+--- /dev/null
++++ b/tests/render/WindowSaturation.cpp
+@@ -0,0 +1,28 @@
++#include <desktop/rule/windowRule/WindowRule.hpp>
++#include <render/OpenGL.hpp>
++#include <render/pass/TexPassElement.hpp>
++#include <gtest/gtest.h>
++
++using namespace Desktop::Rule;
++
++TEST(WindowSaturation, DefaultsAreNeutral) {
++    EXPECT_FLOAT_EQ(Render::GL::CHyprOpenGLImpl::STextureRenderData{}.saturation, 1.F);
++    EXPECT_FLOAT_EQ(CTexPassElement::SRenderData{}.saturation, 1.F);
++}
++
++TEST(WindowSaturation, AcceptsFiniteBoundedValues) {
++    for (const auto& raw : {"0", "1", "1.08", "2"}) {
++        CWindowRule rule("saturation-test");
++        ASSERT_TRUE(rule.addEffect(WINDOW_RULE_EFFECT_SATURATION, std::string{raw})) << raw;
++        ASSERT_EQ(rule.effects().size(), 1);
++        EXPECT_FLOAT_EQ(std::get<float>(rule.effects().front().value), std::stof(raw));
++    }
++}
++
++TEST(WindowSaturation, RejectsInvalidValues) {
++    for (const auto& raw : {"-0.01", "2.01", "nan", "inf", "-inf", "", "1.08garbage"}) {
++        CWindowRule rule("saturation-test");
++        EXPECT_FALSE(rule.addEffect(WINDOW_RULE_EFFECT_SATURATION, std::string{raw})) << raw;
++        EXPECT_TRUE(rule.effects().empty());
++    }
++}
+diff --git a/tests/render/WindowSaturationGPU.cpp b/tests/render/WindowSaturationGPU.cpp
+new file mode 100644
+index 0000000..94d11bf
+--- /dev/null
++++ b/tests/render/WindowSaturationGPU.cpp
+@@ -0,0 +1,145 @@
++#include <EGL/egl.h>
++#include <EGL/eglext.h>
++#include <GLES3/gl3.h>
++#include <gtest/gtest.h>
++#include <array>
++#include <cmath>
++#include <render/shaders/Shaders.hpp>
++
++class WindowSaturationGPU : public ::testing::Test {
++  protected:
++    void SetUp() override {
++        previousDisplay = eglGetCurrentDisplay();
++        previousContext = eglGetCurrentContext();
++        previousDraw    = eglGetCurrentSurface(EGL_DRAW);
++        previousRead    = eglGetCurrentSurface(EGL_READ);
++        if (previousContext != EGL_NO_CONTEXT)
++            GTEST_SKIP() << "GPU test requires no existing current context";
++        display = eglGetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
++        if (display == EGL_NO_DISPLAY || !eglInitialize(display, nullptr, nullptr))
++            GTEST_SKIP() << "No surfaceless EGL display";
++        initialized = true;
++        ASSERT_TRUE(eglBindAPI(EGL_OPENGL_ES_API));
++        const EGLint attrs[] = {EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT, EGL_NONE};
++        EGLConfig    config  = nullptr;
++        EGLint       count   = 0;
++        ASSERT_TRUE(eglChooseConfig(display, attrs, &config, 1, &count));
++        ASSERT_GT(count, 0);
++        const EGLint contextAttrs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
++        context                     = eglCreateContext(display, config, EGL_NO_CONTEXT, contextAttrs);
++        ASSERT_NE(context, EGL_NO_CONTEXT);
++        ASSERT_TRUE(eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, context));
++
++        // Compile the actual production saturation block, not a CPU reimplementation.
++        std::string source;
++        for (const auto& [name, text] : SHADERS) {
++            if (name == "surface.frag")
++                source = text;
++        }
++        ASSERT_FALSE(source.empty());
++        const auto begin = source.find("#if USE_SATURATION\n    //");
++        ASSERT_NE(begin, std::string::npos);
++        const auto end = source.find("#endif", begin);
++        ASSERT_NE(end, std::string::npos);
++        const auto        body     = source.substr(source.find('\n', begin) + 1, end - source.find('\n', begin) - 1);
++        const std::string fragment = "#version 300 es\nprecision highp float;\nuniform vec4 inputColor;\nuniform float windowSaturation;\nuniform vec3 "
++                                     "windowSaturationWeights;\nout vec4 fragColor;\nvoid main(){vec4 pixColor=inputColor;\n" +
++            body + "\nfragColor=pixColor;}";
++        const std::string vertex = "#version 300 es\nvoid main(){vec2 p[3]=vec2[3](vec2(-1,-1),vec2(3,-1),vec2(-1,3));gl_Position=vec4(p[gl_VertexID],0,1);}";
++        program                  = glCreateProgram();
++        for (const auto& [kind, text] : std::array<std::pair<GLenum, std::string>, 2>{{{GL_VERTEX_SHADER, vertex}, {GL_FRAGMENT_SHADER, fragment}}}) {
++            const auto  shader = glCreateShader(kind);
++            const char* ptr    = text.c_str();
++            glShaderSource(shader, 1, &ptr, nullptr);
++            glCompileShader(shader);
++            GLint compiled = 0;
++            glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
++            std::array<char, 4096> log{};
++            glGetShaderInfoLog(shader, log.size(), nullptr, log.data());
++            EXPECT_TRUE(compiled) << log.data();
++            glAttachShader(program, shader);
++            glDeleteShader(shader);
++        }
++        glLinkProgram(program);
++        GLint linked = 0;
++        glGetProgramiv(program, GL_LINK_STATUS, &linked);
++        ASSERT_TRUE(linked);
++        glUseProgram(program);
++        glGenTextures(1, &texture);
++        glBindTexture(GL_TEXTURE_2D, texture);
++        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1, 1, 0, GL_RGBA, GL_FLOAT, nullptr);
++        glGenFramebuffers(1, &framebuffer);
++        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
++        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
++        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
++            GTEST_SKIP() << "No float framebuffer support";
++        glViewport(0, 0, 1, 1);
++        glDisable(GL_BLEND);
++        glUniform3f(glGetUniformLocation(program, "windowSaturationWeights"), 0.2627F, 0.6780F, 0.0593F);
++        ASSERT_EQ(glGetError(), GL_NO_ERROR);
++    }
++
++    void TearDown() override {
++        if (context != EGL_NO_CONTEXT) {
++            glDeleteFramebuffers(1, &framebuffer);
++            glDeleteTextures(1, &texture);
++            glDeleteProgram(program);
++            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
++            eglDestroyContext(display, context);
++        }
++        if (initialized)
++            eglTerminate(display);
++        if (previousDisplay != EGL_NO_DISPLAY)
++            eglMakeCurrent(previousDisplay, previousDraw, previousRead, previousContext);
++    }
++
++    std::array<float, 4> sample(const std::array<float, 4>& input, float amount) {
++        glUniform4fv(glGetUniformLocation(program, "inputColor"), 1, input.data());
++        glUniform1f(glGetUniformLocation(program, "windowSaturation"), amount);
++        glDrawArrays(GL_TRIANGLES, 0, 3);
++        std::array<float, 4> output{};
++        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, output.data());
++        EXPECT_EQ(glGetError(), GL_NO_ERROR);
++        return output;
++    }
++
++    EGLDisplay display = EGL_NO_DISPLAY, previousDisplay = EGL_NO_DISPLAY;
++    EGLContext context = EGL_NO_CONTEXT, previousContext = EGL_NO_CONTEXT;
++    EGLSurface previousDraw = EGL_NO_SURFACE, previousRead = EGL_NO_SURFACE;
++    bool       initialized = false;
++    GLuint     program = 0, texture = 0, framebuffer = 0;
++};
++
++TEST_F(WindowSaturationGPU, PreservesNeutralAndAlphaIncludingHDR) {
++    for (const auto& input : std::array<std::array<float, 4>, 5>{{{0, 0, 0, 0}, {.2F, .2F, .2F, .5F}, {1, 1, 1, 1}, {203, 203, 203, 1}, {1000, 1000, 1000, 1}}}) {
++        const auto output = sample(input, 1.08F);
++        for (size_t i = 0; i < 4; ++i)
++            EXPECT_NEAR(output[i], input[i], 0.0002F);
++    }
++}
++
++TEST_F(WindowSaturationGPU, IncreasesChromaWithoutChangingAlpha) {
++    const std::array<float, 4> input{.6F, .4F, .2F, .75F};
++    const auto                 output = sample(input, 1.08F);
++    EXPECT_GT(output[0], input[0]);
++    EXPECT_LT(output[2], input[2]);
++    EXPECT_FLOAT_EQ(output[3], input[3]);
++    const auto neutral = sample(input, 1.F);
++    for (size_t i = 0; i < 4; ++i)
++        EXPECT_NEAR(neutral[i], input[i], 0.00001F);
++    const auto gray = sample(input, 0.F);
++    EXPECT_NEAR(gray[0], gray[1], 0.00001F);
++    EXPECT_NEAR(gray[1], gray[2], 0.00001F);
++}
++
++TEST_F(WindowSaturationGPU, BoundsExtremesAndPreservesHDRHeadroom) {
++    for (const auto& input : std::array<std::array<float, 4>, 3>{{{1, 0, 0, 1}, {.5F, 0, .5F, .5F}, {203, 100, 10, 1}}}) {
++        const auto output = sample(input, 2.F);
++        for (size_t i = 0; i < 3; ++i) {
++            EXPECT_TRUE(std::isfinite(output[i]));
++            EXPECT_GE(output[i], 0.F);
++            EXPECT_LE(output[i], std::max(input[3], input[0]));
++        }
++        EXPECT_FLOAT_EQ(output[3], input[3]);
++    }
++}

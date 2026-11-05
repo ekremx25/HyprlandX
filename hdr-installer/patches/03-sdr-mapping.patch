@@ -1,0 +1,97 @@
+--- a/src/helpers/cm/ColorManagement.hpp
++++ b/src/helpers/cm/ColorManagement.hpp
+@@ -285,7 +285,7 @@
+                 case CM_TRANSFER_FUNCTION_EXT_LINEAR: return isWindows ? 0.0f : luminances.min;
+                 case CM_TRANSFER_FUNCTION_ST2084_PQ:
+                 case CM_TRANSFER_FUNCTION_HLG: return HDR_MIN_LUMINANCE;
+-                case CM_TRANSFER_FUNCTION_BT1886: return 0.01;
++                case CM_TRANSFER_FUNCTION_BT1886: return sdrMinLuminance >= 0 ? sdrMinLuminance : 0.01f;
+                 case CM_TRANSFER_FUNCTION_GAMMA22:
+                 case CM_TRANSFER_FUNCTION_GAMMA28:
+                 case CM_TRANSFER_FUNCTION_ST240:
+@@ -306,7 +306,7 @@
+                     return isWindows ? SDR_MAX_LUMINANCE : luminances.max;
+                 case CM_TRANSFER_FUNCTION_ST2084_PQ: return HDR_MAX_LUMINANCE;
+                 case CM_TRANSFER_FUNCTION_HLG: return HLG_MAX_LUMINANCE;
+-                case CM_TRANSFER_FUNCTION_BT1886: return 100;
++                case CM_TRANSFER_FUNCTION_BT1886: return sdrMaxLuminance >= 0 ? sdrMaxLuminance : 100;
+                 case CM_TRANSFER_FUNCTION_GAMMA22:
+                 case CM_TRANSFER_FUNCTION_GAMMA28:
+                 case CM_TRANSFER_FUNCTION_ST240:
+--- a/src/render/Renderer.cpp
++++ b/src/render/Renderer.cpp
+@@ -2115,7 +2115,8 @@
+ 
+ static bool isSDR2HDR(CRenderContext& ctx, const NColorManagement::SImageDescription& imageDescription, const NColorManagement::SImageDescription& targetImageDescription) {
+     // might be too strict
+-    return (imageDescription.transferFunction == NColorManagement::CM_TRANSFER_FUNCTION_SRGB ||
++    return (imageDescription.transferFunction == NColorManagement::CM_TRANSFER_FUNCTION_BT1886 ||
++            imageDescription.transferFunction == NColorManagement::CM_TRANSFER_FUNCTION_SRGB ||
+             imageDescription.transferFunction == NColorManagement::CM_TRANSFER_FUNCTION_GAMMA22) &&
+         (targetImageDescription.transferFunction == NColorManagement::CM_TRANSFER_FUNCTION_ST2084_PQ ||
+          targetImageDescription.transferFunction == NColorManagement::CM_TRANSFER_FUNCTION_HLG ||
+--- a/src/render/shaders/glsl/cm_helpers.glsl
++++ b/src/render/shaders/glsl/cm_helpers.glsl
+@@ -258,7 +258,7 @@
+     // The capture copy is SDR, independent of display tone mapping and SDR gain.
+     // PQ desktops may use a reference white above 80 nits; dividing by 80 clips
+     // their colors even though the same SDR content captures correctly as sRGB.
+-    vec2 mirrorRange = srcTF == CM_TRANSFER_FUNCTION_GAMMA22 || srcTF == CM_TRANSFER_FUNCTION_SRGB ? srcTFRange : vec2(SDR_MIN_LUMINANCE, SDR_MAX_LUMINANCE);
++    vec2 mirrorRange = srcTF == CM_TRANSFER_FUNCTION_BT1886 || srcTF == CM_TRANSFER_FUNCTION_GAMMA22 || srcTF == CM_TRANSFER_FUNCTION_SRGB ? srcTFRange : vec2(SDR_MIN_LUMINANCE, SDR_MAX_LUMINANCE);
+     if (srcTF == CM_TRANSFER_FUNCTION_ST2084_PQ && srcRefLuminance > 0.0)
+         mirrorRange = vec2(0.0, srcRefLuminance);
+     // TODO: compress HDR highlights above reference white into the SDR range.
+--- a/tests/protocols/DMABUF.cpp
++++ b/tests/protocols/DMABUF.cpp
+@@ -1673,3 +1673,35 @@
+         EXPECT_EQ(settings.sourceTF, CM_TRANSFER_FUNCTION_ST2084_PQ);
+     }
+ }
++
++TEST_F(CRenderLifecycleTest, BT1886VideoUsesConfiguredSDRWhiteOnHDRDisplay) {
++    using namespace NColorManagement;
++    auto& ctx                     = renderer().context();
++    ctx.m_data.pMonitor           = m_monitor;
++    m_monitor->m_imageDescription = DEFAULT_HDR_IMAGE_DESCRIPTION;
++    m_monitor->m_sdrBrightness    = 1.2f;
++    m_monitor->m_sdrSaturation    = 1.1f;
++    auto desc                     = DEFAULT_SRGB_IMAGE_DESCRIPTION->value();
++    desc.transferFunction         = CM_TRANSFER_FUNCTION_BT1886;
++    desc.luminances               = {.min = 0.01f, .max = 100, .reference = 100};
++    const auto source             = CImageDescription::from(desc);
++    for (const auto target : {LINEAR_IMAGE_DESCRIPTION, DEFAULT_HDR_IMAGE_DESCRIPTION}) {
++        renderer().clearCMSettingsCache(ctx);
++        const auto settings = renderer().getCMSettings(ctx, source, target, nullptr, true, 0.2f, 297);
++        EXPECT_EQ(settings.sourceTF, CM_TRANSFER_FUNCTION_BT1886);
++        EXPECT_FLOAT_EQ(settings.srcTFRange.min, 0.2f);
++        EXPECT_FLOAT_EQ(settings.srcTFRange.max, 297.f);
++        EXPECT_TRUE(settings.needsSDRmod);
++        EXPECT_FLOAT_EQ(settings.sdrBrightnessMultiplier, 1.2f);
++        EXPECT_FLOAT_EQ(settings.sdrSaturation, 1.1f);
++    }
++    renderer().clearCMSettingsCache(ctx);
++    const auto unmodified = renderer().getCMSettings(ctx, source, LINEAR_IMAGE_DESCRIPTION, nullptr, false, 0.2f, 297);
++    EXPECT_FALSE(unmodified.needsSDRmod);
++    EXPECT_FLOAT_EQ(unmodified.srcTFRange.min, 0.01f);
++    EXPECT_FLOAT_EQ(unmodified.srcTFRange.max, 100.f);
++    renderer().clearCMSettingsCache(ctx);
++    const auto sdr = renderer().getCMSettings(ctx, source, DEFAULT_SRGB_IMAGE_DESCRIPTION, nullptr, true, 0.2f, 297);
++    EXPECT_FALSE(sdr.needsSDRmod);
++    EXPECT_FLOAT_EQ(sdr.srcTFRange.max, 100.f);
++}
+--- a/tests/render/ScreenCaptureColorGPU.cpp
++++ b/tests/render/ScreenCaptureColorGPU.cpp
+@@ -165,3 +165,13 @@
+     for (size_t i = 0; i < 3; ++i)
+         EXPECT_NEAR(output[i], expected, .002F);
+ }
++
++TEST_F(ScreenCaptureColorGPU, BT1886CaptureNormalizesUsingSourceWhite) {
++    for (const float value : {.05F, .18F, .5F, 1.F}) {
++        const auto  output   = sample({value, value, value, 1.F}, 80.F, 1, 1);
++        const float linear   = std::pow(value, 2.4F);
++        const float expected = linear <= .0031308F ? 12.92F * linear : 1.055F * std::pow(linear, 1.F / 2.4F) - .055F;
++        for (size_t i = 0; i < 3; ++i)
++            EXPECT_NEAR(output[i], expected, .0002F);
++    }
++}
