@@ -147,3 +147,31 @@ TEST_F(ScreenCaptureColorGPU, SDRCaptureAndHDRDisplayRemainUnchanged) {
         EXPECT_NEAR(hdr[i], expectedNits, .02F);
     EXPECT_FLOAT_EQ(hdr[3], 1.F);
 }
+
+TEST_F(ScreenCaptureColorGPU, BT1886UsesDisplayGammaOnGPU) {
+    for (const float value : {0.F, .05F, .18F, .5F, 1.F}) {
+        const auto  output   = sample({value, value, value, 1.F}, 80.F, 1, 0);
+        const float expected = .2F + 250.8F * std::pow(value, 2.4F);
+        for (size_t i = 0; i < 3; ++i)
+            EXPECT_NEAR(output[i], expected, .002F);
+        EXPECT_FLOAT_EQ(output[3], 1.F);
+    }
+}
+
+TEST_F(ScreenCaptureColorGPU, XVYCCRetainsCameraTransferCurve) {
+    const auto  output   = sample({.5F, .5F, .5F, 1.F}, 80.F, 8, 0);
+    const float alpha    = 1.F + 5.5F * .018053968510807F;
+    const float expected = .2F + 250.8F * std::pow((.5F + alpha - 1.F) / alpha, 1.F / .45F);
+    for (size_t i = 0; i < 3; ++i)
+        EXPECT_NEAR(output[i], expected, .002F);
+}
+
+TEST_F(ScreenCaptureColorGPU, BT1886CaptureNormalizesUsingSourceWhite) {
+    for (const float value : {.05F, .18F, .5F, 1.F}) {
+        const auto  output   = sample({value, value, value, 1.F}, 80.F, 1, 1);
+        const float linear   = std::pow(value, 2.4F);
+        const float expected = linear <= .0031308F ? 12.92F * linear : 1.055F * std::pow(linear, 1.F / 2.4F) - .055F;
+        for (size_t i = 0; i < 3; ++i)
+            EXPECT_NEAR(output[i], expected, .0002F);
+    }
+}

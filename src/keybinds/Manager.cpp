@@ -15,7 +15,6 @@
 #include "../managers/eventLoop/EventLoopManager.hpp"
 #include "../managers/input/InputManager.hpp"
 #include "../pointer/PointerManager.hpp"
-#include "../protocols/Hotkey.hpp"
 #include "../protocols/InputCapture.hpp"
 #include "../protocols/ShortcutsInhibit.hpp"
 #include "../protocols/core/DataDevice.hpp"
@@ -216,8 +215,6 @@ bool CKeybindManager::onKeyEvent(std::any event, SP<IKeyboard> keyboard) {
         return false;
 
     const auto MODIFIERS = g_pInputManager->getModsFromAllKBs();
-    if (PROTO::hotkey && PROTO::hotkey->onKey(KEYSYM, MODIFIERS, KEYCODE, KEY_EVENT.state == WL_KEYBOARD_KEY_STATE_PRESSED, KEY_EVENT.timeMs))
-        return false;
 
     Config::Actions::state()->m_timeLastMs    = KEY_EVENT.timeMs;
     Config::Actions::state()->m_lastCode      = KEYCODE;
@@ -341,6 +338,9 @@ bool CKeybindManager::onAxisEvent(const IPointer::SAxisEvent& event, SP<IPointer
             .submap       = std::string{currentSubmap()},
         },
         nullptr);
+
+    if (!RESULT.passEvent)
+        shadowBinds();
 
     return RESULT.passEvent;
 }
@@ -508,7 +508,7 @@ SBindResult CKeybindManager::processEvent(const SBindEventContext& context, cons
             suppressSubChords(bind, context);
         }
 
-        if (context.pressed && (bind->hasFlag(BIND_FLAG_NON_CONSUMING) || bind->hasFlag(BIND_FLAG_RELEASE) || bind->hasFlag(BIND_FLAG_AUTO_CONSUMING)))
+        if (context.pressed && (bind->hasFlag(BIND_FLAG_NON_CONSUMING) || bind->hasFlag(BIND_FLAG_AUTO_CONSUMING)))
             continue;
 
         claimed = true;
@@ -772,6 +772,9 @@ void CKeybindManager::shadowBinds(const std::optional<SResolvedKey>& excluded, c
         const bool MATCH_RELEASE = bind->hasFlag(BIND_FLAG_RELEASE) && bind->chordSize() <= 1;
 
         for (const auto& input : m_inputState.pressed()) {
+            if (input.key.event)
+                continue;
+
             const auto device = input.device.lock();
             if (!device)
                 continue;

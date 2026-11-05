@@ -68,14 +68,23 @@ vec3 tfInvExtSRGB(vec3 color) {
     return sign(color) * tfInvSRGB(abs(color));
 }
 
+// BT.2087 color conversion uses the ideal BT.1886 display EOTF (gamma 2.4).
 vec3 tfInvBT1886(vec3 color) {
-    return tfInvLinPow(color, BT1886_POW, BT1886_CUT, BT1886_SCALE, BT1886_ALPHA);
+    return pow(max(color, vec3(0.0)), vec3(2.4));
+}
+
+vec3 tfBT1886(vec3 color) {
+    return pow(max(color, vec3(0.0)), vec3(1.0 / 2.4));
+}
+
+vec3 tfInvBT709(vec3 color) {
+    return tfInvLinPow(color, BT709_POW, BT709_CUT, BT709_SCALE, BT709_ALPHA);
 }
 
 vec3 tfInvXVYCC(vec3 color) {
-    // The inverse transfer function for XVYCC is the BT1886 transfer function mirrored around 0,
+    // The inverse transfer function for XVYCC is the BT709 transfer function mirrored around 0,
     // same as what EXT sRGB is to sRGB.
-    return sign(color) * tfInvBT1886(abs(color));
+    return sign(color) * tfInvBT709(abs(color));
 }
 
 vec3 tfInvST240(vec3 color) {
@@ -111,14 +120,14 @@ vec3 tfExtSRGB(vec3 color) {
     return sign(color) * tfSRGB(abs(color));
 }
 
-vec3 tfBT1886(vec3 color) {
-    return tfLinPow(color, BT1886_POW, BT1886_CUT, BT1886_SCALE, BT1886_ALPHA);
+vec3 tfBT709(vec3 color) {
+    return tfLinPow(color, BT709_POW, BT709_CUT, BT709_SCALE, BT709_ALPHA);
 }
 
 vec3 tfXVYCC(vec3 color) {
-    // The transfer function for XVYCC is the BT1886 transfer function mirrored around 0,
+    // The transfer function for XVYCC is the BT709 transfer function mirrored around 0,
     // same as what EXT sRGB is to sRGB.
-    return sign(color) * tfBT1886(abs(color));
+    return sign(color) * tfBT709(abs(color));
 }
 
 vec3 tfST240(vec3 color) {
@@ -249,7 +258,7 @@ vec4
     // The capture copy is SDR, independent of display tone mapping and SDR gain.
     // PQ desktops may use a reference white above 80 nits; dividing by 80 clips
     // their colors even though the same SDR content captures correctly as sRGB.
-    vec2 mirrorRange = srcTF == CM_TRANSFER_FUNCTION_GAMMA22 || srcTF == CM_TRANSFER_FUNCTION_SRGB ? srcTFRange : vec2(SDR_MIN_LUMINANCE, SDR_MAX_LUMINANCE);
+    vec2 mirrorRange = srcTF == CM_TRANSFER_FUNCTION_BT1886 || srcTF == CM_TRANSFER_FUNCTION_GAMMA22 || srcTF == CM_TRANSFER_FUNCTION_SRGB ? srcTFRange : vec2(SDR_MIN_LUMINANCE, SDR_MAX_LUMINANCE);
     if (srcTF == CM_TRANSFER_FUNCTION_ST2084_PQ && srcRefLuminance > 0.0)
         mirrorRange = vec2(0.0, srcRefLuminance);
     // TODO: compress HDR highlights above reference white into the SDR range.

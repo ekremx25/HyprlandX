@@ -41,13 +41,12 @@ Firefox and Edge profiles are not modified.
 
 ## Download
 
-- [Standalone install.sh](https://github.com/ekremx25/HyprlandX/releases/download/v0.57.0-hdrfix2-1/install.sh)
-- [Installer bundle with patches and build recipe](https://github.com/ekremx25/HyprlandX/releases/download/v0.57.0-hdrfix2-1/Hyprland-HDR-Installer.tar.gz)
+- [Standalone install.sh](https://github.com/ekremx25/HyprlandX/releases/download/v0.57.1-hdrfix4-2/install.sh)
+- [Installer bundle with patches and build recipe](https://github.com/ekremx25/HyprlandX/releases/download/v0.57.1-hdrfix4-2/Hyprland-HDR-Installer.tar.gz)
 
-**These installer assets target Hyprland 0.57.1, even though the hosting release has
-the historical tag `v0.57.0-hdrfix2-1`.** The old binary, standalone patch and
-SHA256SUMS have been removed. GitHub's automatic Source code archives reflect the
-old tag; use the installer downloads above for HDR fix 4.
+The release source archives contain upstream Hyprland 0.57.1 with all three HDR
+patches applied, plus the standalone installer and its readable build recipe.
+The installer uses pinned upstream source and applies the bundled patches itself.
 
 ## Requirements
 
@@ -61,7 +60,7 @@ HDR must already be enabled in your monitor configuration.
 Run as your normal user, without prefixing the script with sudo:
 
 ```sh
-curl -fL https://github.com/ekremx25/HyprlandX/releases/download/v0.57.0-hdrfix2-1/install.sh -o install.sh
+curl -fL https://github.com/ekremx25/HyprlandX/releases/download/v0.57.1-hdrfix4-2/install.sh -o install.sh
 bash install.sh --check
 bash install.sh
 ```

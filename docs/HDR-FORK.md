@@ -80,3 +80,11 @@ Before installing a main-based build, validate your configuration with
 this newer base limits `decoration.shadow.render_power` to 4 and
 `decoration.blur.vibrancy` to 1.0. Configuration reload does not replace the running
 compositor binary; installing a new build requires a new session to activate it.
+
+## HDR fix 4 / Hyprland 0.57.1
+
+This release source applies all three patches included in hdr-installer/patches.
+It adds ideal BT.1886 gamma-2.4 CPU/GPU conversion, includes BT.1886 video in
+SDR-to-HDR brightness mapping, and preserves source luminance during capture.
+The standalone installer creates no backups and targets Arch/CachyOS x86_64
+with an installed Hyprland 0.57.1 package. See the root README for installation.

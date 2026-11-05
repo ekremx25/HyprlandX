@@ -188,6 +188,11 @@ CWLSurfaceResource::CWLSurfaceResource(SP<CWlSurface> resource_) : m_resource(re
             // remove any pending states.
             m_stateQueue.clear();
             m_pending.reset();
+
+            // A destroyed role can leave the wl_surface mapped, suppressing a new role's
+            // empty initial commit. Assigned roles manage their own unmap timing.
+            if (m_role->role() == SURFACE_ROLE_UNASSIGNED)
+                unmap();
             return;
         }
 
@@ -721,7 +726,11 @@ PImageDescription CWLSurfaceResource::getPreferredImageDescription() {
     else if (m_hlSurface.valid() && WINDOW)
         monitor = WINDOW->m_monitor;
 
-    return monitor ? clientImageDescription(monitor) : g_pCompositor->getPreferredImageDescription();
+    if (!monitor)
+        return g_pCompositor->getPreferredImageDescription();
+
+    // auto HDR only switches once a fullscreen client submits HDR content, so offer it the description it would switch to
+    return monitor->getAutoHDRImageDescription(parent.lock()).value_or(clientImageDescription(monitor));
 }
 
 void CWLSurfaceResource::sortSubsurfaces() {
